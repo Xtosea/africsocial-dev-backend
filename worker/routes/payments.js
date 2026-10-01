@@ -146,7 +146,7 @@ export async function initializePaystackPayment(
 
     const currency = "NGN";
 
-    let amount = getProductPrice(
+    const amount = getProductPrice(
       productId,
       currency
     );
@@ -160,7 +160,6 @@ export async function initializePaystackPayment(
     }
 
     let targetPostId = null;
-    let targetListingId = null;
     let boostConfig = null;
 
     if (product.type === "boost") {
@@ -169,110 +168,53 @@ export async function initializePaystackPayment(
           ? body.targetPostId.trim()
           : "";
 
-      const rawTargetListingId =
-        typeof body?.targetListingId === "string"
-          ? body.targetListingId.trim()
-          : "";
-
-      if (!rawTargetPostId && !rawTargetListingId) {
+      if (!rawTargetPostId) {
         return json({
           success: false,
-          code: "BOOST_TARGET_REQUIRED",
+          code: "TARGET_POST_REQUIRED",
           message:
-            "A target post, Reel, or Marketplace listing is required for a Boost payment.",
+            "A target post or Reel is required for a Boost payment.",
         }, 400);
       }
 
-      if (rawTargetPostId && rawTargetListingId) {
+      if (!ObjectId.isValid(rawTargetPostId)) {
         return json({
           success: false,
-          code: "MULTIPLE_BOOST_TARGETS",
+          code: "INVALID_TARGET_POST",
           message:
-            "A Boost payment cannot target both a post and a Marketplace listing.",
+            "The target post or Reel ID is invalid.",
         }, 400);
       }
 
-      if (rawTargetPostId) {
-        if (!ObjectId.isValid(rawTargetPostId)) {
-          return json({
-            success: false,
-            code: "INVALID_TARGET_POST",
-            message:
-              "The target post or Reel ID is invalid.",
-          }, 400);
-        }
+      targetPostId =
+        new ObjectId(rawTargetPostId);
 
-        targetPostId =
-          new ObjectId(rawTargetPostId);
+      const targetPost =
+        await db.collection("posts").findOne({
+          _id: targetPostId,
+        });
 
-        const targetPost =
-          await db.collection("posts").findOne({
-            _id: targetPostId,
-          });
-
-        if (!targetPost) {
-          return json({
-            success: false,
-            code: "TARGET_POST_NOT_FOUND",
-            message:
-              "The post or Reel to boost was not found.",
-          }, 404);
-        }
-
-        if (
-          String(targetPost.user) !==
-          String(userId)
-        ) {
-          return json({
-            success: false,
-            code: "TARGET_POST_NOT_OWNED",
-            message:
-              "You can only boost your own content.",
-          }, 403);
-        }
+      if (!targetPost) {
+        return json({
+          success: false,
+          code: "TARGET_POST_NOT_FOUND",
+          message:
+            "The post or Reel to boost was not found.",
+        }, 404);
       }
 
-      if (rawTargetListingId) {
-        if (!ObjectId.isValid(rawTargetListingId)) {
-          return json({
-            success: false,
-            code: "INVALID_TARGET_LISTING",
-            message:
-              "The Marketplace listing ID is invalid.",
-          }, 400);
-        }
-
-        targetListingId =
-          new ObjectId(rawTargetListingId);
-
-        const targetListing =
-          await db.collection("marketplaces").findOne({
-            _id: targetListingId,
-          });
-
-        if (!targetListing) {
-          return json({
-            success: false,
-            code: "TARGET_LISTING_NOT_FOUND",
-            message:
-              "The Marketplace listing to boost was not found.",
-          }, 404);
-        }
-
-        if (
-          String(targetListing.seller) !==
-          String(userId)
-        ) {
-          return json({
-            success: false,
-            code: "TARGET_LISTING_NOT_OWNED",
-            message:
-              "You can only boost your own Marketplace listing.",
-          }, 403);
-        }
+      if (
+        String(targetPost.user) !==
+        String(userId)
+      ) {
+        return json({
+          success: false,
+          code: "TARGET_POST_NOT_OWNED",
+          message:
+            "You can only boost your own content.",
+        }, 403);
       }
-
-      const rawBoostConfig =
+       const rawBoostConfig =
        body?.boostConfig;
       if (
         !rawBoostConfig ||
@@ -510,128 +452,8 @@ export async function initializePaystackPayment(
         startMode: normalizedStartMode,
         scheduledStart: normalizedScheduledStart,
       };
-
-    } else if (product.type === "advertisement") {
-      const rawAdvertisementCampaignId =
-        typeof body?.advertisementCampaignId === "string"
-          ? body.advertisementCampaignId.trim()
-          : "";
-
-      if (!rawAdvertisementCampaignId) {
-        return json({
-          success: false,
-          code: "ADVERTISEMENT_CAMPAIGN_REQUIRED",
-          message:
-            "An advertisement campaign is required for an Advertisement payment.",
-        }, 400);
-      }
-
-      if (!ObjectId.isValid(rawAdvertisementCampaignId)) {
-        return json({
-          success: false,
-          code: "INVALID_ADVERTISEMENT_CAMPAIGN",
-          message: "The advertisement campaign ID is invalid.",
-        }, 400);
-      }
-
-      const advertisementCampaignId =
-        new ObjectId(rawAdvertisementCampaignId);
-
-      const advertisementCampaign =
-        await db.collection("advertisement_campaigns").findOne({
-          _id: advertisementCampaignId,
-          advertiserId: userId,
-        });
-
-      if (!advertisementCampaign) {
-        return json({
-          success: false,
-          code: "ADVERTISEMENT_CAMPAIGN_NOT_FOUND",
-          message: "Advertisement campaign not found.",
-        }, 404);
-      }
-
-      if (
-        advertisementCampaign.productId !== product.id ||
-        advertisementCampaign.productType !== product.type
-      ) {
-        return json({
-          success: false,
-          code: "ADVERTISEMENT_PRODUCT_MISMATCH",
-          message:
-            "The advertisement campaign does not match the selected product.",
-        }, 400);
-      }
-
-      if (advertisementCampaign.paymentStatus !== "unpaid") {
-        return json({
-          success: false,
-          code: "ADVERTISEMENT_ALREADY_PAID",
-          message:
-            "This advertisement campaign has already been paid for.",
-        }, 400);
-      }
-
-      if (advertisementCampaign.status !== "pending_payment") {
-        return json({
-          success: false,
-          code: "ADVERTISEMENT_NOT_PENDING_PAYMENT",
-          message:
-            "This advertisement campaign is not awaiting payment.",
-        }, 400);
-      }
-
-      const campaignAmount = Number(advertisementCampaign.amount);
-
-      if (
-        !Number.isFinite(campaignAmount) ||
-        campaignAmount <= 0
-      ) {
-        return json({
-          success: false,
-          code: "INVALID_ADVERTISEMENT_AMOUNT",
-          message:
-            "The advertisement campaign has an invalid payment amount.",
-        }, 400);
-      }
-
-      if (product.customAmountAllowed === true) {
-        const minimumAmount = Number(product.minimumAmount || 0);
-
-        if (campaignAmount < minimumAmount) {
-          return json({
-            success: false,
-            code: "INVALID_ADVERTISEMENT_AMOUNT",
-            message:
-              "The Enterprise advertisement amount is below the required minimum.",
-            minimumAmount,
-          }, 400);
-        }
-
-        amount = campaignAmount;
-      } else {
-        const catalogAmount = getProductPrice(
-          productId,
-          currency
-        );
-
-        if (
-          !Number.isFinite(catalogAmount) ||
-          campaignAmount !== catalogAmount
-        ) {
-          return json({
-            success: false,
-            code: "ADVERTISEMENT_AMOUNT_MISMATCH",
-            message:
-              "The advertisement campaign amount does not match the product price.",
-          }, 400);
-        }
-
-        amount = catalogAmount;
-      }
-
-      let advertisementPaymentCampaignId =
-        advertisementCampaignId;
+    }
+      
     } else if (product.type !== "premium") {
       return json({
         success: false,
@@ -677,10 +499,6 @@ export async function initializePaystackPayment(
       productType: product.type,
 
       targetPostId,
-      targetListingId,
-      boostConfig,
-      advertisementCampaignId:
-        advertisementPaymentCampaignId || null,
 
       amount,
 
@@ -748,18 +566,6 @@ export async function initializePaystackPayment(
                 ? {
                     targetPostId:
                       targetPostId.toString(),
-                  }
-                : {}),
-              ...(targetListingId
-                ? {
-                    targetListingId:
-                      targetListingId.toString(),
-                  }
-                : {}),
-              ...(advertisementPaymentCampaignId
-                ? {
-                    advertisementCampaignId:
-                      advertisementPaymentCampaignId.toString(),
                   }
                 : {}),
             }),
@@ -1084,15 +890,10 @@ export async function verifyPaystackPayment(
             db,
             verifiedPayment
           )
-        : payment.productType === "advertisement"
-          ? await activateVerifiedAdvertisement(
-              db,
-              verifiedPayment
-            )
-          : await activateVerifiedPayment(
-              db,
-              verifiedPayment
-            );
+        : await activateVerifiedPayment(
+            db,
+            verifiedPayment
+          );
 
     return json({
       success: true,
@@ -1102,17 +903,9 @@ export async function verifyPaystackPayment(
         activation.alreadyActivated,
 
       message:
-        payment.productType === "advertisement"
-          ? activation.alreadyActivated
-            ? "Payment verified successfully. Advertisement campaign was already activated."
-            : "Payment verified successfully and advertisement campaign has been activated."
-          : payment.productType === "boost"
-            ? activation.alreadyActivated
-              ? "Payment verified successfully. Boost was already activated."
-              : "Payment verified successfully and Boost has been activated."
-            : activation.alreadyActivated
-              ? "Payment verified successfully. Premium was already activated."
-              : "Payment verified successfully and Premium has been activated.",
+        activation.alreadyActivated
+          ? "Payment verified successfully. Premium was already activated."
+          : "Payment verified successfully and Premium has been activated.",
 
       payment: {
         transactionReference,
@@ -1136,15 +929,10 @@ export async function verifyPaystackPayment(
             boost:
               activation.boost,
           }
-        : payment.productType === "advertisement"
-          ? {
-              campaign:
-                activation.campaign,
-            }
-          : {
-              subscription:
-                activation.subscription,
-            }),
+        : {
+            subscription:
+              activation.subscription,
+          }),
     });
   } catch (error) {
     console.error(

@@ -3,7 +3,7 @@ name: Deploy AfricSocial Worker
 on:
   push:
     branches:
-      - cloudflare-workers
+      - development
 
   workflow_dispatch:
 

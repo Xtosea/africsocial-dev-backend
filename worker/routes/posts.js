@@ -1532,7 +1532,22 @@ export async function createReel(
       caption,
       videoUrl,
       thumbnailUrl,
+      durationSeconds,
     } = body;
+
+    const duration = Number(durationSeconds);
+
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return json({
+        error: "Valid video duration is required",
+      }, 400);
+    }
+
+    if (duration > 60) {
+      return json({
+        error: "Video exceeds 60 seconds",
+      }, 400);
+    }
 
     if (!videoUrl) {
       return json({
@@ -1546,6 +1561,7 @@ export async function createReel(
       user: userId,
       content: caption || "",
       isReel: true,
+      durationSeconds: duration,
       media: [
         {
           url: videoUrl,

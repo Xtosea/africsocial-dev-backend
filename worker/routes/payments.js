@@ -452,8 +452,6 @@ export async function initializePaystackPayment(
         startMode: normalizedStartMode,
         scheduledStart: normalizedScheduledStart,
       };
-    }
-      
     } else if (product.type !== "premium") {
       return json({
         success: false,

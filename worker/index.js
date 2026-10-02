@@ -115,6 +115,8 @@ import {
   markStoryViewed,
 } from "./routes/stories.js";
 
+import { getMusic } from "./routes/music.js";
+import { getStickers } from "./routes/stickers.js";
 import { getDatabase, withFreshDatabase } from "./utils/db.js";
 
 import { ensureApplicationIndexes } from "./utils/indexes.js";
@@ -2715,7 +2717,25 @@ if (
       }
     }
 
-    // ================= DEFAULT =================
+    // ================= MUSIC =================
+
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/music"
+) {
+  return getMusic(request, env);
+}
+
+// ================= STICKERS =================
+
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/stickers"
+) {
+  return getStickers(request, env);
+}
+
+// ================= DEFAULT =================
 
     return json({
       status: "ok",

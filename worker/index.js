@@ -2283,65 +2283,6 @@ if (
   }
 }
 
-// ================= TEMP STORY MUSIC COLLECTION TEST =================
-if (
-  request.method === "GET" &&
-  url.pathname === "/api/story-music-collection-test"
-) {
-  try {
-    const startedAt = Date.now();
-    const db = await getDatabase(env);
-
-    const collections = await db
-      .listCollections({
-        name: "storymusics",
-      })
-      .toArray();
-
-    const sample = await db
-      .collection("storymusics")
-      .findOne(
-        {},
-        {
-          projection: {
-            _id: 1,
-            title: 1,
-            artist: 1,
-            audioUrl: 1,
-            coverUrl: 1,
-          },
-        }
-      );
-
-    return json({
-      ok: true,
-      collection: "storymusics",
-      collectionExists: collections.length > 0,
-      collectionsFound: collections.length,
-      sampleFields: sample
-        ? Object.keys(sample)
-        : [],
-      sampleExists: Boolean(sample),
-      durationMs: Date.now() - startedAt,
-    });
-  } catch (err) {
-    console.error(
-      "STORY MUSIC COLLECTION TEST ERROR:",
-      err
-    );
-
-    return json(
-      {
-        ok: false,
-        error: err?.message || String(err),
-        name: err?.name || "UnknownError",
-        code: err?.code ?? null,
-      },
-      500
-    );
-  }
-}
-
 // ================= MARKETPLACE COUNT TEST =================
 if (
   request.method === "GET" &&

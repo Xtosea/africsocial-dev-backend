@@ -121,6 +121,7 @@ import {
   getStoryMusic,
   createStoryMusic,
 } from "./routes/storyMusic.js";
+import { getR2SignedUploadUrl } from "./routes/r2.js";
 import { getDatabase, withFreshDatabase } from "./utils/db.js";
 
 import { ensureApplicationIndexes } from "./utils/indexes.js";
@@ -1767,6 +1768,22 @@ if (
   url.pathname === "/api/stories/feed/foryou"
 ) {
   return getStoryFeed(request, env);
+}
+
+// ================= R2 SIGNED UPLOAD =================
+
+if (
+  request.method === "OPTIONS" &&
+  url.pathname === "/api/r2/signed-url"
+) {
+  return getR2SignedUploadUrl(request, env);
+}
+
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/r2/signed-url"
+) {
+  return getR2SignedUploadUrl(request, env);
 }
 
 if (

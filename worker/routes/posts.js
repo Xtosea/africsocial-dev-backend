@@ -1769,3 +1769,157 @@ export async function viewReel(
     }, isAuthError(err) ? 401 : 500);
   }
 }
+
+
+/* ================= CREATOR QUALIFYING VIEW ================= */
+
+export async function recordReelWatch(
+  request,
+  env
+) {
+  try {
+    const viewerId =
+      await authenticate(request, env);
+
+    const body = await request.json();
+
+    const {
+      contentId,
+      sessionId,
+      watchedSeconds,
+    } = body;
+
+    if (!validId(contentId)) {
+      return json({
+        error: "Invalid reel ID",
+      }, 400);
+    }
+
+    if (
+      typeof sessionId !== "string" ||
+      !sessionId.trim()
+    ) {
+      return json({
+        error: "Valid session ID is required",
+      }, 400);
+    }
+
+    const watched = Number(watchedSeconds);
+
+    if (
+      !Number.isFinite(watched) ||
+      watched < 0
+    ) {
+      return json({
+        error: "Valid watched seconds are required",
+      }, 400);
+    }
+
+    const db = await getDatabase(env);
+    const reelId = new ObjectId(contentId);
+
+    const reel =
+      await db.collection("posts").findOne({
+        _id: reelId,
+        isReel: true,
+      });
+
+    if (!reel) {
+      return json({
+        error: "Reel not found",
+      }, 404);
+    }
+
+    const creatorId = reel.user;
+
+    if (!creatorId) {
+      return json({
+        error: "Reel creator not found",
+      }, 400);
+    }
+
+    const duration =
+      Number(reel.durationSeconds);
+
+    if (
+      !Number.isFinite(duration) ||
+      duration <= 0
+    ) {
+      return json({
+        error: "Reel duration is unavailable",
+      }, 400);
+    }
+
+    const safeWatchedSeconds =
+      Math.min(watched, duration);
+
+    const requiredWatchSeconds =
+      Math.max(
+        3,
+        Math.min(duration * 0.5, 10)
+      );
+
+    if (
+      safeWatchedSeconds <
+      requiredWatchSeconds
+    ) {
+      return json({
+        success: true,
+        qualified: false,
+        requiredWatchSeconds,
+        watchedSeconds: safeWatchedSeconds,
+      });
+    }
+
+    const qualifiedAt = new Date();
+
+    try {
+      await db.collection(
+        "creator_qualifying_views"
+      ).insertOne({
+        creatorId,
+        contentId: reelId,
+        viewerId: new ObjectId(viewerId),
+        contentType: "reel",
+        videoDurationSeconds: duration,
+        watchedSeconds: safeWatchedSeconds,
+        sessionId: sessionId.trim(),
+        qualifiedAt,
+        createdAt: qualifiedAt,
+      });
+
+      return json({
+        success: true,
+        qualified: true,
+        alreadyQualified: false,
+        requiredWatchSeconds,
+        watchedSeconds: safeWatchedSeconds,
+      });
+    } catch (insertError) {
+      if (
+        insertError?.code === 11000
+      ) {
+        return json({
+          success: true,
+          qualified: true,
+          alreadyQualified: true,
+          requiredWatchSeconds,
+          watchedSeconds: safeWatchedSeconds,
+        });
+      }
+
+      throw insertError;
+    }
+  } catch (err) {
+    console.error(
+      "RECORD REEL WATCH ERROR:",
+      err
+    );
+
+    return json({
+      error: isAuthError(err)
+        ? err.message
+        : err.message,
+    }, isAuthError(err) ? 401 : 500);
+  }
+}

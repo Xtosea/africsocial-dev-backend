@@ -73,6 +73,7 @@ import {
   createReel,
   getReels,
   viewReel,
+    recordReelWatch,
 } from "./routes/posts.js";
 import {
   getListings,
@@ -1912,6 +1913,17 @@ if (
           parts[4]
         );
       }
+    }
+
+    // RECORD CREATOR QUALIFYING REEL WATCH
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/posts/reels/watch"
+    ) {
+      return await recordReelWatch(
+        request,
+        env
+      );
     }
 
     // POST-SPECIFIC ROUTES

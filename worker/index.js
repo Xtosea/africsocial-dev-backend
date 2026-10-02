@@ -117,6 +117,10 @@ import {
 
 import { getMusic } from "./routes/music.js";
 import { getStickers } from "./routes/stickers.js";
+import {
+  getStoryMusic,
+  createStoryMusic,
+} from "./routes/storyMusic.js";
 import { getDatabase, withFreshDatabase } from "./utils/db.js";
 
 import { ensureApplicationIndexes } from "./utils/indexes.js";
@@ -2733,6 +2737,22 @@ if (
   url.pathname === "/api/stickers"
 ) {
   return getStickers(request, env);
+}
+
+// ================= STORY MUSIC =================
+
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/story-music"
+) {
+  return getStoryMusic(request, env);
+}
+
+if (
+  request.method === "POST" &&
+  url.pathname === "/api/story-music-admin"
+) {
+  return createStoryMusic(request, env);
 }
 
 // ================= DEFAULT =================

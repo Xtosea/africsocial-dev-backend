@@ -81,5 +81,34 @@ export async function ensureApplicationIndexes(db) {
     }
   );
 
+  // ------------------------------------------------------------
+  // CREATOR QUALIFYING VIEWS
+  // One qualifying view per viewer per content.
+  // Fast rolling-period queries by creator and content.
+  // ------------------------------------------------------------
+  await db.collection("creator_qualifying_views").createIndex(
+    {
+      viewerId: 1,
+      contentId: 1,
+    },
+    {
+      unique: true,
+    }
+  );
+
+  await db.collection("creator_qualifying_views").createIndex(
+    {
+      creatorId: 1,
+      qualifiedAt: -1,
+    }
+  );
+
+  await db.collection("creator_qualifying_views").createIndex(
+    {
+      contentId: 1,
+      qualifiedAt: -1,
+    }
+  );
+
   return true;
 }

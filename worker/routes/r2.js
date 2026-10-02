@@ -1,5 +1,6 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { authenticate } from "../utils/auth.js";
 
 function corsHeaders() {
   return {
@@ -31,7 +32,7 @@ function getExtension(contentType) {
     "audio/aac": "aac",
   };
 
-  return extensions[type] || "bin";
+  return extensions[type] || null;
 }
 
 export async function getR2SignedUploadUrl(request, env) {
@@ -43,9 +44,58 @@ export async function getR2SignedUploadUrl(request, env) {
   }
 
   try {
+    // Authenticate the requester.
+    let userId;
+
+    try {
+      userId = await authenticate(request, env);
+    } catch (error) {
+      return json(
+        {
+          success: false,
+          error: error.message || "Authentication required",
+        },
+        401
+      );
+    }
+
+    const { getDatabase } = await import("../utils/db.js");
+    const db = await getDatabase(env);
+
+    // Only administrators can request Story Music upload URLs.
+    const user = await db.collection("users").findOne(
+      { _id: userId },
+      {
+        projection: {
+          role: 1,
+        },
+      }
+    );
+
+    if (user?.role !== "admin") {
+      return json(
+        {
+          success: false,
+          error: "Admin access required",
+        },
+        403
+      );
+    }
+
     const contentType =
-      new URL(request.url).searchParams.get("contentType") ||
-      "application/octet-stream";
+      new URL(request.url).searchParams.get("contentType") || "";
+
+    const extension = getExtension(contentType);
+
+    if (!extension) {
+      return json(
+        {
+          success: false,
+          error: "Unsupported audio content type",
+        },
+        400
+      );
+    }
 
     if (!env.R2_ACCOUNT_ID) {
       return json(
@@ -109,8 +159,6 @@ export async function getR2SignedUploadUrl(request, env) {
       },
     });
 
-    const extension = getExtension(contentType);
-
     const randomPart = crypto.randomUUID().replace(/-/g, "");
 
     const fileName =
@@ -126,7 +174,8 @@ export async function getR2SignedUploadUrl(request, env) {
       expiresIn: 300,
     });
 
-    const customDomain = env.R2_CUSTOM_DOMAIN.replace(/\/+$/, "");
+    const customDomain =
+      env.R2_CUSTOM_DOMAIN.replace(/\/+$/, "");
 
     return json({
       success: true,
@@ -137,7 +186,10 @@ export async function getR2SignedUploadUrl(request, env) {
       expiresIn: 300,
     });
   } catch (error) {
-    console.error("R2 signed upload URL error:", error);
+    console.error(
+      "R2 signed upload URL error:",
+      error
+    );
 
     return json(
       {

@@ -2298,11 +2298,30 @@ if (
       })
       .toArray();
 
+    const sample = await db
+      .collection("storymusics")
+      .findOne(
+        {},
+        {
+          projection: {
+            _id: 1,
+            title: 1,
+            artist: 1,
+            audioUrl: 1,
+            coverUrl: 1,
+          },
+        }
+      );
+
     return json({
       ok: true,
       collection: "storymusics",
       collectionExists: collections.length > 0,
       collectionsFound: collections.length,
+      sampleFields: sample
+        ? Object.keys(sample)
+        : [],
+      sampleExists: Boolean(sample),
       durationMs: Date.now() - startedAt,
     });
   } catch (err) {

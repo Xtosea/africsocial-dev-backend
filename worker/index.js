@@ -253,6 +253,69 @@ async function handleRequest(request, env, ctx) {
       });
     }
 
+    // ============================================================
+    // SOCKET TICKET / WEBSOCKET ROUTING
+    // ============================================================
+
+    if (
+      request.method === "POST" &&
+      pathname === "/api/socket-ticket"
+    ) {
+      try {
+        const userId = await authenticate(request, env);
+
+        const id = env.SOCKET_ROOM.idFromName("global");
+        const stub = env.SOCKET_ROOM.get(id);
+
+        const ticketRequest = new Request(
+          "https://socket-room/ticket",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              userId: userId.toString(),
+            }),
+          }
+        );
+
+        const response = await stub.fetch(ticketRequest);
+
+        const headers = new Headers(response.headers);
+        for (const [key, value] of Object.entries(corsHeaders())) {
+          headers.set(key, value);
+        }
+
+        return new Response(response.body, {
+          status: response.status,
+          headers,
+        });
+      } catch (error) {
+        return json(
+          {
+            error: error?.message || "Authentication failed",
+          },
+          401
+        );
+      }
+    }
+
+    if (
+      request.method === "GET" &&
+      pathname === "/ws"
+    ) {
+      const id = env.SOCKET_ROOM.idFromName("global");
+      const stub = env.SOCKET_ROOM.get(id);
+
+      const wsUrl = new URL(request.url);
+      wsUrl.pathname = "/connect";
+
+      const wsRequest = new Request(wsUrl.toString(), request);
+
+      return await stub.fetch(wsRequest);
+    }
+
     // ================= HEALTH =================
 
     if (

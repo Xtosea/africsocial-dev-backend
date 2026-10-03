@@ -121,7 +121,7 @@ import {
   getStoryMusic,
   createStoryMusic,
 } from "./routes/storyMusic.js";
-import { getR2SignedUploadUrl } from "./routes/r2.js";
+import { getR2SignedUploadUrl, uploadStoryMusicToR2 } from "./routes/r2.js";
 import { getDatabase, withFreshDatabase } from "./utils/db.js";
 
 import { ensureApplicationIndexes } from "./utils/indexes.js";
@@ -1768,6 +1768,15 @@ if (
   url.pathname === "/api/stories/feed/foryou"
 ) {
   return getStoryFeed(request, env);
+}
+
+// ================= R2 NATIVE STORY MUSIC UPLOAD =================
+
+if (
+  request.method === "PUT" &&
+  url.pathname === "/api/r2/story-music-upload"
+) {
+  return uploadStoryMusicToR2(request, env);
 }
 
 // ================= R2 SIGNED UPLOAD =================

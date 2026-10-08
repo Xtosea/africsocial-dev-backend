@@ -114,6 +114,7 @@ import {
   markStoryViewed,
 } from "./routes/stories.js";
 
+import { getR2VideoSignedUploadUrl } from "./routes/r2Video.js";
 import { getDatabase, withFreshDatabase } from "./utils/db.js";
 
 import { ensureApplicationIndexes } from "./utils/indexes.js";
@@ -1760,6 +1761,20 @@ if (
   url.pathname === "/api/stories/feed/foryou"
 ) {
   return getStoryFeed(request, env);
+}
+
+if (
+  request.method === "OPTIONS" &&
+  url.pathname === "/api/r2/video-signed-url"
+) {
+  return getR2VideoSignedUploadUrl(request, env);
+}
+
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/r2/video-signed-url"
+) {
+  return getR2VideoSignedUploadUrl(request, env);
 }
 
 if (

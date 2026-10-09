@@ -115,6 +115,11 @@ import {
 } from "./routes/stories.js";
 
 import { getR2VideoSignedUploadUrl } from "./routes/r2Video.js";
+import {
+  getStoryMusic,
+  uploadStoryMusic,
+  saveStoryMusic,
+} from "./routes/storyMusic.js";
 import { getDatabase, withFreshDatabase } from "./utils/db.js";
 
 import { ensureApplicationIndexes } from "./utils/indexes.js";
@@ -1776,6 +1781,30 @@ if (
 ) {
   return getR2VideoSignedUploadUrl(request, env);
 }
+
+    // ================= STORY MUSIC =================
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/api/story-music"
+    ) {
+      return await getStoryMusic(request, env);
+    }
+
+    if (
+      request.method === "PUT" &&
+      url.pathname === "/api/r2/story-music-upload"
+    ) {
+      return await uploadStoryMusic(request, env);
+    }
+
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/story-music-admin"
+    ) {
+      return await saveStoryMusic(request, env);
+    }
+
 
 if (
   request.method === "POST" &&

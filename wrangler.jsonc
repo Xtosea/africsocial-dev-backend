@@ -1,16 +1,18 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "africsocial-api-dev",
+  "name": "africsocial-api",
   "main": "worker/index.js",
-
   "compatibility_date": "2026-08-15",
-
   "compatibility_flags": [
     "nodejs_compat"
   ],
-
   "workers_dev": true,
-
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_BUCKET",
+      "bucket_name": "africa"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -19,14 +21,14 @@
       }
     ]
   },
-
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["SocketRoom"]
+      "new_sqlite_classes": [
+        "SocketRoom"
+      ]
     }
   ],
-
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,
@@ -41,6 +43,5 @@
       "persist": true,
       "head_sampling_rate": 1
     }
-  },
-
+  }
 }

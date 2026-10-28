@@ -214,6 +214,23 @@ export async function getWallet(request, env, db) {
 
     const userId = new ObjectId(payload.id);
 
+    const account = await db.collection("users").findOne(
+      { _id: userId },
+      { projection: { deletionStatus: 1 } }
+    );
+
+    if (
+      ["requested", "pending", "processing", "review_required"].includes(
+        String(account?.deletionStatus || "").toLowerCase()
+      )
+    ) {
+      return json({
+        success: false,
+        code: "ACCOUNT_DELETION_PENDING",
+        error: "Wallet access is disabled while account deletion is pending.",
+      }, 403);
+    }
+
     let wallet = await db.collection("wallets").findOne({
       user: userId,
     });
@@ -418,8 +435,20 @@ export async function convertPoints(request, env, db) {
 
     const user = await db.collection("users").findOne(
       { _id: userId },
-      { projection: { role: 1 } }
+      { projection: { role: 1, deletionStatus: 1 } }
     );
+
+    const deletionStatus = String(
+      user?.deletionStatus || ""
+    ).toLowerCase();
+
+    if (["requested", "pending", "processing", "review_required"].includes(deletionStatus)) {
+      return json({
+        success: false,
+        code: "ACCOUNT_DELETION_PENDING",
+        error: "Points conversion is disabled while account deletion is pending.",
+      }, 403);
+    }
 
     const isAdmin = user?.role === "admin";
 
@@ -810,7 +839,7 @@ export async function adminAdjustPoints(request, env, db) {
 
     const targetUser = await db.collection("users").findOne(
       { _id: targetUserId },
-      { projection: { _id: 1 } }
+      { projection: { _id: 1, deletionStatus: 1 } }
     );
 
     if (!targetUser) {
@@ -818,6 +847,18 @@ export async function adminAdjustPoints(request, env, db) {
         success: false,
         error: "Target user not found",
       }, 404);
+    }
+
+    if (
+      ["requested", "pending", "processing", "review_required"].includes(
+        String(targetUser.deletionStatus || "").toLowerCase()
+      )
+    ) {
+      return json({
+        success: false,
+        code: "ACCOUNT_DELETION_PENDING",
+        error: "Administrative point adjustments are disabled while account deletion is pending.",
+      }, 409);
     }
 
     /* ================= CALCULATE CHANGE ================= */

@@ -81,5 +81,22 @@ export async function ensureApplicationIndexes(db) {
     }
   );
 
+  // ------------------------------------------------------------
+  // ACCOUNT DELETION REQUESTS
+  // One request per user; support finding requests by status.
+  // ------------------------------------------------------------
+  await db.collection("account_deletion_requests").createIndex(
+    { userId: 1 },
+    {
+      unique: true,
+      name: "uniq_account_deletion_user",
+    }
+  );
+
+  await db.collection("account_deletion_requests").createIndex(
+    { status: 1, requestedAt: 1 },
+    { name: "account_deletion_status_requested_at" }
+  );
+
   return true;
 }

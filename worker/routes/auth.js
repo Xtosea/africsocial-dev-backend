@@ -244,7 +244,17 @@ export async function login(request, env, db) {
 
     
 
-    if (!env.JWT_SECRET) {
+        if (
+      ["requested", "pending", "processing"].includes(
+        String(user.deletionStatus || "").toLowerCase()
+      )
+    ) {
+      return json({
+        message: "This account has a pending deletion request.",
+      }, 403);
+    }
+
+if (!env.JWT_SECRET) {
       throw new Error("JWT_SECRET is missing");
     }
 

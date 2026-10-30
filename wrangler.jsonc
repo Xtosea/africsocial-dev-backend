@@ -1,6 +1,6 @@
 {
 "$schema": "node_modules/wrangler/config-schema.json",
-"name": "africsocial-api",
+"name": "africsocial-api-dev",
 "main": "worker/index.js",
 "compatibility_date": "2026-08-15",
 "compatibility_flags": [
@@ -11,7 +11,7 @@
 "r2_buckets": [
 {
 "binding": "MEDIA_BUCKET",
-"bucket_name": "afribook"
+"bucket_name": "africbook"
 }
 ],
 
@@ -36,7 +36,7 @@
 "observability": {
 "enabled": true,
 "head_sampling_rate": 1,
-"redact_query_string": false,
+
 
 "logs": {
   "enabled": true,
@@ -49,10 +49,6 @@
   "enabled": true,
   "head_sampling_rate": 1,
   "persist": true
-},
-
-"issue_detection": {
-  "enabled": true
 }
 
 }

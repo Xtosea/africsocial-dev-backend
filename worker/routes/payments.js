@@ -112,6 +112,18 @@ export async function initializePaystackPayment(
       }, 404);
     }
 
+    const deletionStatus = String(
+      user.deletionStatus || ""
+    ).toLowerCase();
+
+    if (["requested", "pending", "processing", "review_required"].includes(deletionStatus)) {
+      return json({
+        success: false,
+        code: "ACCOUNT_DELETION_PENDING",
+        message: "New purchases are disabled while account deletion is pending.",
+      }, 403);
+    }
+
     if (!user.email) {
       return json({
         success: false,
@@ -146,10 +158,7 @@ export async function initializePaystackPayment(
 
     const currency = "NGN";
 
-    const amount = getProductPrice(
-      productId,
-      currency
-    );
+    let amount = getProductPrice(productId, currency);
 
     if (!Number.isFinite(amount) || amount <= 0) {
       return json({
@@ -161,6 +170,8 @@ export async function initializePaystackPayment(
 
     let targetPostId = null;
     let boostConfig = null;
+    let advertisementCampaignId = null;
+    let advertisementCampaign = null;
 
     if (product.type === "boost") {
       const rawTargetPostId =
@@ -453,7 +464,197 @@ export async function initializePaystackPayment(
         scheduledStart: normalizedScheduledStart,
       };
     }
-      
+
+        else if (product.type === "advertisement") {
+
+          const rawCampaignId =
+
+            typeof body?.advertisementCampaignId === "string"
+
+              ? body.advertisementCampaignId.trim()
+
+              : "";
+
+
+
+          if (!rawCampaignId || !ObjectId.isValid(rawCampaignId)) {
+
+            return json({
+
+              success: false,
+
+              code: "INVALID_ADVERTISEMENT_CAMPAIGN",
+
+              message: "A valid advertisement campaign ID is required.",
+
+            }, 400);
+
+          }
+
+
+
+          advertisementCampaignId = new ObjectId(rawCampaignId);
+
+
+
+          advertisementCampaign =
+
+            await db.collection("advertisement_campaigns").findOne({
+
+              _id: advertisementCampaignId,
+
+              advertiserId: new ObjectId(userId),
+
+            });
+
+
+
+          if (!advertisementCampaign) {
+
+            return json({
+
+              success: false,
+
+              code: "ADVERTISEMENT_CAMPAIGN_NOT_FOUND",
+
+              message: "The advertisement campaign was not found for this account.",
+
+            }, 404);
+
+          }
+
+
+
+          if (
+
+            advertisementCampaign.productId !== product.id ||
+
+            (advertisementCampaign.productType &&
+
+              advertisementCampaign.productType !== "advertisement")
+
+          ) {
+
+            return json({
+
+              success: false,
+
+              code: "ADVERTISEMENT_PRODUCT_MISMATCH",
+
+              message: "The campaign does not match the selected advertisement product.",
+
+            }, 400);
+
+          }
+
+
+
+          if (
+
+            advertisementCampaign.status !== "pending_payment" ||
+
+            advertisementCampaign.paymentStatus !== "unpaid" ||
+
+            (advertisementCampaign.paymentReference != null &&
+
+              advertisementCampaign.paymentReference !== "")
+
+          ) {
+
+            return json({
+
+              success: false,
+
+              code: "ADVERTISEMENT_CAMPAIGN_NOT_PAYABLE",
+
+              message: "This campaign is no longer available for checkout.",
+
+            }, 409);
+
+          }
+
+
+
+          const savedAmount = Number(advertisementCampaign.amount);
+
+          const catalogueAmount = getProductPrice(product.id, "NGN");
+
+
+
+          if (
+
+            !Number.isFinite(savedAmount) ||
+
+            savedAmount <= 0 ||
+
+            advertisementCampaign.currency !== "NGN"
+
+          ) {
+
+            return json({
+
+              success: false,
+
+              code: "INVALID_ADVERTISEMENT_AMOUNT",
+
+              message: "The saved campaign amount or currency is invalid.",
+
+            }, 400);
+
+          }
+
+
+
+          if (product.customAmountAllowed === true) {
+
+            if (
+
+              !Number.isFinite(Number(product.minimumAmount)) ||
+
+              savedAmount < Number(product.minimumAmount)
+
+            ) {
+
+              return json({
+
+                success: false,
+
+                code: "ADVERTISEMENT_AMOUNT_TOO_LOW",
+
+                message: "The campaign amount is below the product minimum.",
+
+              }, 400);
+
+            }
+
+          } else if (
+
+            !Number.isFinite(catalogueAmount) ||
+
+            savedAmount !== catalogueAmount
+
+          ) {
+
+            return json({
+
+              success: false,
+
+              code: "ADVERTISEMENT_AMOUNT_MISMATCH",
+
+              message: "The campaign amount does not match the selected product.",
+
+            }, 400);
+
+          }
+
+
+
+          amount = savedAmount;
+
+        }
+
+
+
     else if (product.type !== "premium") {
       return json({
         success: false,
@@ -472,10 +673,9 @@ export async function initializePaystackPayment(
      * Premium plans.
      */
     const existingSubscription =
-      await getActivePremiumSubscription(
-        db,
-        userId
-      );
+      product.type === "premium"
+        ? await getActivePremiumSubscription(db, userId)
+        : null;
 
     const transactionReference =
       generatePaymentReference();
@@ -499,6 +699,7 @@ export async function initializePaystackPayment(
       productType: product.type,
 
       targetPostId,
+      advertisementCampaignId,
 
       amount,
 
@@ -530,6 +731,50 @@ export async function initializePaystackPayment(
     await db.collection("payments").insertOne(
       paymentRecord
     );
+
+    if (advertisementCampaign) {
+      const reserveResult =
+        await db.collection("advertisement_campaigns").updateOne(
+          {
+            _id: advertisementCampaign._id,
+            advertiserId: new ObjectId(userId),
+            status: "pending_payment",
+            paymentStatus: "unpaid",
+            $or: [
+              { paymentReference: null },
+              { paymentReference: { $exists: false } },
+              { paymentReference: "" },
+            ],
+          },
+          {
+            $set: {
+              paymentReference: transactionReference,
+              paymentCheckoutStatus: "initializing",
+              paymentCheckoutStartedAt: createdAt,
+              updatedAt: createdAt,
+            },
+          }
+        );
+
+      if (reserveResult.modifiedCount !== 1) {
+        await db.collection("payments").updateOne(
+          { transactionReference, status: "pending" },
+          {
+            $set: {
+              status: "failed",
+              gatewayStatus: "campaign_reservation_conflict",
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        return json({
+          success: false,
+          code: "ADVERTISEMENT_RESERVATION_CONFLICT",
+          message: "The campaign could not be reserved for checkout. Please refresh and try again.",
+        }, 409);
+      }
+    }
 
     try {
       const paystackResponse =
@@ -568,6 +813,12 @@ export async function initializePaystackPayment(
                       targetPostId.toString(),
                   }
                 : {}),
+              ...(advertisementCampaignId
+                ? {
+                    advertisementCampaignId:
+                      advertisementCampaignId.toString(),
+                  }
+                : {}),
             }),
           }
         );
@@ -575,6 +826,7 @@ export async function initializePaystackPayment(
       const gatewayData =
         paystackResponse?.data || {};
 
+      try {
       await db.collection("payments").updateOne(
         {
           transactionReference,
@@ -606,6 +858,9 @@ export async function initializePaystackPayment(
           },
         }
       );
+      } catch (persistenceError) {
+        console.error("PAYSTACK INITIALIZATION PERSISTENCE ERROR:", persistenceError);
+      }
 
       return json({
         success: true,
@@ -640,28 +895,62 @@ export async function initializePaystackPayment(
         },
       });
     } catch (paystackError) {
+      const paystackStatus = Number(paystackError?.paystackStatus);
+
+      // Release a campaign only when Paystack clearly rejected the request.
+      // Timeouts, rate limits, invalid responses and server errors remain uncertain.
+      const isDefiniteRejection =
+        [400, 401, 403, 404, 422].includes(paystackStatus);
+
+// Preserve the reference when Paystack's outcome is uncertain.
+if (!isDefiniteRejection) {
+  paystackError.transactionReference = transactionReference;
+  paystackError.paymentOutcomeUnknown = true;
+} else {
+  paystackError.paymentInitializationRejected = true;
+}
+
+      const failedAt = new Date();
+
       await db.collection("payments").updateOne(
-        {
-          transactionReference,
-        },
+        { transactionReference },
         {
           $set: {
-            status: "failed",
-
-            gatewayStatus: "initialize_failed",
-
+            status: isDefiniteRejection ? "failed" : "pending",
+            gatewayStatus: isDefiniteRejection
+              ? "initialize_rejected"
+              : "initialize_outcome_unknown",
             gatewayResponse:
-              paystackError?.paystackResponse ||
-              {
+              paystackError?.paystackResponse || {
                 message:
                   paystackError?.message ||
                   "Paystack initialization failed.",
               },
-
-            updatedAt: new Date(),
+            updatedAt: failedAt,
           },
         }
       );
+
+      if (advertisementCampaign && isDefiniteRejection) {
+        // Release only this transaction's reservation. Never clear a newer one.
+        await db.collection("advertisement_campaigns").updateOne(
+          {
+            _id: advertisementCampaign._id,
+            advertiserId: new ObjectId(userId),
+            status: "pending_payment",
+            paymentStatus: "unpaid",
+            paymentReference: transactionReference,
+          },
+          {
+            $set: {
+              paymentReference: null,
+              paymentCheckoutStatus: "rejected",
+              paymentCheckoutFailedAt: failedAt,
+              updatedAt: failedAt,
+            },
+          }
+        );
+      }
 
       throw paystackError;
     }
@@ -702,6 +991,15 @@ export async function initializePaystackPayment(
     return json({
       success: false,
       message,
+      ...(error?.paymentOutcomeUnknown && error?.transactionReference
+        ? {
+            transactionReference: error.transactionReference,
+            paymentOutcomeUnknown: true,
+          }
+        : {}),
+      ...(error?.paymentInitializationRejected
+        ? { paymentInitializationRejected: true }
+        : {}),
     }, status);
   }
 }
@@ -715,6 +1013,167 @@ export async function initializePaystackPayment(
  * Premium activation will be connected after the
  * webhook/idempotency layer is added.
  */
+
+export async function recoverPaystackCheckout(
+  request,
+  env,
+  db,
+  reference
+) {
+  try {
+    const userId = await authenticate(request, env);
+    const transactionReference = String(reference || "").trim();
+
+    if (!transactionReference) {
+      return json({
+        success: false,
+        code: "PAYMENT_REFERENCE_REQUIRED",
+        message: "Payment reference is required.",
+      }, 400);
+    }
+
+    const payment = await db.collection("payments").findOne({
+      transactionReference,
+    });
+
+    if (!payment) {
+      return json({
+        success: false,
+        code: "PAYMENT_NOT_FOUND",
+        message: "Payment record not found.",
+      }, 404);
+    }
+
+    if (String(payment.user) !== String(userId)) {
+      return json({
+        success: false,
+        code: "PAYMENT_ACCESS_DENIED",
+        message: "You are not authorized to access this payment.",
+      }, 403);
+    }
+
+    const currentUser = await db.collection("users").findOne(
+      { _id: userId },
+      { projection: { deletionStatus: 1 } }
+    );
+
+    const deletionStatus = String(
+      currentUser?.deletionStatus || ""
+    ).toLowerCase();
+
+    if (["requested", "pending", "processing", "review_required"].includes(deletionStatus)) {
+      return json({
+        success: false,
+        code: "ACCOUNT_DELETION_PENDING",
+        message: "Checkout recovery is disabled while account deletion is pending.",
+      }, 403);
+    }
+
+    if (String(payment.status || "").toLowerCase() === "paid") {
+      return json({
+        success: false,
+        code: "PAYMENT_ALREADY_COMPLETED",
+        message: "This payment is already marked as paid. Check its payment status instead of reopening checkout.",
+      }, 409);
+    }
+
+    // Check Paystack directly before returning an existing checkout URL.
+    // Fail closed if Paystack cannot confirm the transaction's current state.
+    let liveGatewayData;
+
+    try {
+      const liveResponse = await verifyPaystackTransaction(
+        env,
+        transactionReference
+      );
+      liveGatewayData = liveResponse?.data || {};
+    } catch (verificationError) {
+      console.error(
+        "PAYSTACK CHECKOUT RECOVERY STATUS CHECK ERROR:",
+        verificationError
+      );
+
+      return json({
+        success: false,
+        code: "PAYMENT_STATUS_UNAVAILABLE",
+        message: "We could not confirm the current payment status. Please check the payment status again shortly.",
+      }, 503);
+    }
+
+    if (
+      String(liveGatewayData.reference || "") !== transactionReference
+    ) {
+      return json({
+        success: false,
+        code: "PAYMENT_REFERENCE_MISMATCH",
+        message: "Paystack could not confirm the expected payment reference. Do not start another payment.",
+      }, 409);
+    }
+
+    if (String(liveGatewayData.status || "").toLowerCase() === "success") {
+      return json({
+        success: false,
+        code: "PAYMENT_REQUIRES_VERIFICATION",
+        message: "Paystack reports a successful transaction. Check the existing payment status to complete verification.",
+        verifyUrl: `/api/payments/paystack/verify/${encodeURIComponent(transactionReference)}`,
+      }, 409);
+    }
+
+    if (!["ongoing", "pending"].includes(
+      String(liveGatewayData.status || "").toLowerCase()
+    )) {
+      return json({
+        success: false,
+        code: "CHECKOUT_NOT_RECOVERABLE",
+        message: "Paystack does not report this transaction as an ongoing checkout. Check its status before attempting another payment.",
+        paymentStatus: liveGatewayData.status || "unknown",
+      }, 409);
+    }
+
+    const authorizationUrl =
+      payment.gatewayResponse?.authorization_url;
+
+    if (
+      String(payment.status || "").toLowerCase() !== "pending" ||
+      String(payment.gatewayStatus || "").toLowerCase() !== "initialized" ||
+      typeof authorizationUrl !== "string" ||
+      !/^https:\/\/checkout\.paystack\.com\//i.test(authorizationUrl)
+    ) {
+      return json({
+        success: false,
+        code: "CHECKOUT_NOT_RECOVERABLE",
+        message: "Saved checkout details are unavailable or no longer eligible for recovery. Check the existing payment status before attempting another payment.",
+      }, 409);
+    }
+
+    return json({
+      success: true,
+      recovered: true,
+      payment: {
+        reference: transactionReference,
+        authorizationUrl,
+        accessCode: payment.gatewayResponse?.access_code || null,
+      },
+    });
+  } catch (error) {
+    console.error("PAYSTACK CHECKOUT RECOVERY ERROR:", error);
+
+    const message =
+      error?.message === "Authentication required" ||
+      error?.message === "Invalid token" ||
+      error?.message === "Token expired" ||
+      error?.message === "Invalid authentication token" ||
+      error?.message === "Invalid user ID"
+        ? error.message
+        : "Failed to recover the existing checkout.";
+
+    return json({
+      success: false,
+      message,
+    }, message === "Failed to recover the existing checkout." ? 500 : 401);
+  }
+}
+
 export async function verifyPaystackPayment(
   request,
   env,
@@ -884,16 +1343,103 @@ export async function verifyPaystackPayment(
           : payment.gatewayReference,
     };
 
-    const activation =
-      payment.productType === "boost"
-        ? await activateVerifiedBoost(
-            db,
-            verifiedPayment
-          )
-        : await activateVerifiedPayment(
-            db,
-            verifiedPayment
-          );
+    const currentUser = await db.collection("users").findOne(
+      { _id: userId },
+      { projection: { deletionStatus: 1 } }
+    );
+
+    const currentDeletionStatus = String(
+      currentUser?.deletionStatus || ""
+    ).toLowerCase();
+
+    if (
+      ["requested", "pending", "processing", "review_required"].includes(
+        currentDeletionStatus
+      )
+    ) {
+      await db.collection("payments").updateOne(
+        { transactionReference },
+        {
+          $set: {
+            accountDeletionReviewRequired: true,
+            accountDeletionReviewStatus: "pending",
+            accountDeletionReviewReason: "account_deletion_pending",
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      return json({
+        success: true,
+        verified: true,
+        activated: false,
+        requiresReview: true,
+        message:
+          "Payment verified successfully, but account deletion is pending. " +
+          "The payment has been flagged for review; no new product was activated.",
+        payment: {
+          transactionReference,
+          productId: payment.productId,
+          productType: payment.productType,
+          amount: payment.amount,
+          currency: payment.currency,
+          channel: gatewayData.channel || null,
+          status: "paid",
+          reviewStatus: "pending",
+        },
+      });
+    }
+
+    let activation;
+
+    try {
+      activation =
+        payment.productType === "advertisement"
+          ? await activateVerifiedAdvertisement(db, verifiedPayment)
+          : payment.productType === "boost"
+            ? await activateVerifiedBoost(db, verifiedPayment)
+            : await activateVerifiedPayment(db, verifiedPayment);
+    } catch (activationError) {
+      if (payment.productType !== "advertisement") {
+        throw activationError;
+      }
+
+      console.error(
+        "ADVERTISEMENT ACTIVATION ERROR:",
+        activationError
+      );
+
+      await db.collection("payments").updateOne(
+        { transactionReference, status: "paid" },
+        {
+          $set: {
+            activationReviewRequired: true,
+            activationReviewStatus: "pending",
+            activationReviewReason: "advertisement_activation_failed",
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      return json({
+        success: true,
+        verified: true,
+        activated: false,
+        requiresReview: true,
+        message:
+          "Payment was verified successfully, but advertisement activation could not be completed. The payment has been flagged for review.",
+        payment: {
+          transactionReference,
+          productId: payment.productId,
+          productType: payment.productType,
+          amount: payment.amount,
+          currency: payment.currency,
+          channel: gatewayData.channel || null,
+          status: "paid",
+          reviewStatus: "pending",
+        },
+      }, 202);
+    }
 
     return json({
       success: true,
@@ -903,9 +1449,17 @@ export async function verifyPaystackPayment(
         activation.alreadyActivated,
 
       message:
-        activation.alreadyActivated
-          ? "Payment verified successfully. Premium was already activated."
-          : "Payment verified successfully and Premium has been activated.",
+        payment.productType === "advertisement"
+          ? (activation.alreadyActivated
+              ? "Payment verified successfully. Advertisement was already activated."
+              : "Payment verified successfully and advertisement has been activated.")
+          : payment.productType === "boost"
+            ? (activation.alreadyActivated
+                ? "Payment verified successfully. Boost was already activated."
+                : "Payment verified successfully and boost has been activated.")
+            : (activation.alreadyActivated
+                ? "Payment verified successfully. Premium was already activated."
+                : "Payment verified successfully and Premium has been activated."),
 
       payment: {
         transactionReference,
@@ -924,15 +1478,11 @@ export async function verifyPaystackPayment(
           "paid",
       },
 
-      ...(payment.productType === "boost"
-        ? {
-            boost:
-              activation.boost,
-          }
-        : {
-            subscription:
-              activation.subscription,
-          }),
+      ...(payment.productType === "advertisement"
+        ? { campaign: activation.campaign }
+        : payment.productType === "boost"
+          ? { boost: activation.boost }
+          : { subscription: activation.subscription }),
     });
   } catch (error) {
     console.error(

@@ -244,6 +244,98 @@ function isAdmin(user) {
 }
 
 
+/*
+ * PUBLIC PAID ADVERTISEMENT DELIVERY
+ * GET /api/ads/delivery
+ *
+ * Restricted-target campaigns are excluded until viewer matching
+ * is implemented. This endpoint does not count impressions.
+ */
+export async function getDeliverableAdvertisementCampaigns(
+  request,
+  env,
+  db
+) {
+  try {
+    const now = new Date();
+    const url = new URL(request.url);
+    const requestedLimit = Number(url.searchParams.get("limit") || 5);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(10, Math.max(1, Math.floor(requestedLimit)))
+      : 5;
+
+    const filter = {
+      status: "active",
+      paymentStatus: "paid",
+      startDate: { $lte: now },
+      endDate: { $gt: now },
+      "target.country": { $in: ["", null] },
+      "target.state": { $in: ["", null] },
+      "target.city": { $in: ["", null] },
+      "target.gender": { $in: ["all", "", null] },
+      "target.ageMin": { $in: [18, null] },
+      "target.ageMax": { $in: [65, null] },
+    };
+
+    const campaigns = await db
+      .collection("advertisement_campaigns")
+      .find(filter, {
+        projection: {
+          _id: 1,
+          title: 1,
+          description: 1,
+          mediaUrl: 1,
+          destinationUrl: 1,
+          cta: 1,
+          productName: 1,
+          createdAt: 1,
+        },
+      })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .toArray();
+
+    const publicCampaigns = campaigns.map((campaign) => ({
+      id: String(campaign._id),
+      label: "Sponsored",
+      title: typeof campaign.title === "string" ? campaign.title : "",
+      description:
+        typeof campaign.description === "string"
+          ? campaign.description
+          : "",
+      mediaUrl:
+        typeof campaign.mediaUrl === "string"
+          ? campaign.mediaUrl
+          : "",
+      destinationUrl:
+        typeof campaign.destinationUrl === "string"
+          ? campaign.destinationUrl
+          : "",
+      cta: typeof campaign.cta === "string" ? campaign.cta : "Learn more",
+      productName:
+        typeof campaign.productName === "string"
+          ? campaign.productName
+          : "",
+    }));
+
+    return json({ success: true, campaigns: publicCampaigns });
+  } catch (error) {
+    console.error(
+      "ADVERTISEMENT DELIVERY ERROR:",
+      error?.name || "UnknownError"
+    );
+
+    return json(
+      {
+        success: false,
+        message: "Unable to load sponsored campaigns.",
+        campaigns: [],
+      },
+      500
+    );
+  }
+}
+
 /* ============================================================
    GET ADVERTISEMENT PRODUCTS
    ============================================================
@@ -1130,25 +1222,34 @@ export async function cancelAdvertisementCampaign(
       );
     }
 
-    await db
-      .collection(
-        "advertisement_campaigns"
-      )
+    const cancelResult = await db
+      .collection("advertisement_campaigns")
       .updateOne(
         {
-          _id:
-            campaign._id,
+          _id: campaign._id,
+          status: "pending_payment",
+          paymentStatus: "unpaid",
+          paymentReference: null,
         },
         {
           $set: {
-            status:
-              "cancelled",
-
-            updatedAt:
-              new Date(),
+            status: "cancelled",
+            updatedAt: new Date(),
           },
-        }
+        },
       );
+
+    if (cancelResult.modifiedCount !== 1) {
+      return json(
+        {
+          success: false,
+          code: "CAMPAIGN_CHECKOUT_IN_PROGRESS",
+          message:
+            "This campaign has a payment in progress or its status has changed. Please refresh and check its payment status.",
+        },
+        409,
+      );
+    }
 
     return json({
       success: true,

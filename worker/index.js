@@ -127,6 +127,7 @@ import { listProducts } from "./utils/products.js";
 import { getPremiumStatus } from "./utils/premium.js";
 import {
   getAdvertisementProducts,
+  getDeliverableAdvertisementCampaigns,
   createAdvertisementCampaign,
   getAdvertisementCampaigns,
   getAdvertisementCampaign,
@@ -136,6 +137,7 @@ import {
 import {
   initializePaystackPayment,
   verifyPaystackPayment,
+  recoverPaystackCheckout,
 } from "./routes/payments.js";
 
 import {
@@ -144,6 +146,10 @@ import {
   rejectBoostAdmin,
 } from "./routes/adminBoosts.js";
 import { authenticate } from "./utils/auth.js";
+import {
+  listAdminAccountDeletions,
+  previewAdminAccountDeletion,
+} from "./routes/accountDeletionAdmin.js";
 import {
   listCurrencies,
   normalizeCurrency,
@@ -386,6 +392,24 @@ async function handleRequest(request, env, ctx) {
       );
     }
 
+    // RECOVER EXISTING PAYSTACK CHECKOUT
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith(
+        "/api/payments/paystack/recover/"
+      )
+    ) {
+      const reference = url.pathname.split("/").pop();
+      const database = await getDatabase(env);
+
+      return recoverPaystackCheckout(
+        request,
+        env,
+        database,
+        reference
+      );
+    }
+
     // VERIFY PAYSTACK PAYMENT
     if (
       request.method === "GET" &&
@@ -524,6 +548,361 @@ try {
       }
     }
 
+
+
+
+    // ================= ACCOUNT DELETION STATUS =================
+    if (
+      request.method === "GET" &&
+      url.pathname === "/api/account/delete/status"
+    ) {
+      try {
+        const userId = await authenticate(request, env);
+        const database = await getDatabase(env);
+
+        const [user, deletionRequest] = await Promise.all([
+          database.collection("users").findOne(
+            { _id: userId },
+            { projection: { deletionStatus: 1, deletionRequestedAt: 1 } }
+          ),
+          database.collection("account_deletion_requests").findOne(
+            { userId },
+            {
+              projection: {
+                status: 1,
+                requestedAt: 1,
+                updatedAt: 1,
+                completedAt: 1,
+                cancelledAt: 1,
+                reviewReason: 1
+              }
+            }
+          )
+        ]);
+
+        if (!user) {
+          return json({ success: false, message: "Account not found." }, 404);
+        }
+
+        return json({
+          success: true,
+          status: deletionRequest?.status || user.deletionStatus || "none",
+          requestedAt:
+            deletionRequest?.requestedAt || user.deletionRequestedAt || null,
+          updatedAt: deletionRequest?.updatedAt || null,
+          completedAt: deletionRequest?.completedAt || null,
+          cancelledAt: deletionRequest?.cancelledAt || null,
+          reviewReason: deletionRequest?.reviewReason || null
+        });
+      } catch (error) {
+        const message = String(error?.message || "");
+
+        if (
+          message.includes("Authentication required") ||
+          message.includes("Invalid token") ||
+          message.includes("Invalid authentication token") ||
+          message.includes("Token expired") ||
+          message.includes("Invalid user ID")
+        ) {
+          return json({
+            success: false,
+            message: "Please sign in with a valid account."
+          }, 401);
+        }
+
+        console.error("ACCOUNT DELETION STATUS ERROR:", error);
+        return json({
+          success: false,
+          message: "Could not retrieve account deletion status."
+        }, 500);
+      }
+    }
+
+    // ================= CANCEL ACCOUNT DELETION =================
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/account/delete/cancel"
+    ) {
+      try {
+        const userId = await authenticate(request, env);
+        const database = await getDatabase(env);
+        const requests = database.collection("account_deletion_requests");
+        const users = database.collection("users");
+        const now = new Date();
+
+        const existing = await requests.findOne({ userId });
+
+        if (!existing) {
+          return json({
+            success: false,
+            status: "none",
+            message: "There is no account deletion request to cancel."
+          }, 404);
+        }
+
+        // Reconcile a previous cancellation if the user-record update failed.
+        if (existing.status === "cancelled") {
+          await users.updateOne(
+            { _id: userId },
+            {
+              $unset: {
+                deletionStatus: "",
+                deletionRequestedAt: ""
+              },
+              $set: { updatedAt: now }
+            }
+          );
+
+          return json({
+            success: true,
+            status: "cancelled",
+            message: "The account deletion request has been cancelled."
+          });
+        }
+
+          // Enforce the 30-day cancellation grace period.
+          // Missing or invalid request dates must not be guessed.
+          const graceCutoff = new Date(
+            now.getTime() - 30 * 24 * 60 * 60 * 1000
+          );
+
+          const requestedAt = existing.requestedAt
+            ? new Date(existing.requestedAt)
+            : null;
+
+          if (
+            existing.status === "pending" &&
+            (
+              !requestedAt ||
+              !Number.isFinite(requestedAt.getTime()) ||
+              requestedAt <= graceCutoff ||
+              requestedAt > now
+            )
+          ) {
+            return json({
+              success: false,
+              status: "pending",
+              message:
+                "The 30-day cancellation period has ended or the request date cannot be verified. Please contact support if you believe this is an error."
+            }, 409);
+          }
+
+          // Check the deadline atomically when changing the request status.
+          const result = await requests.updateOne(
+            {
+              userId,
+              status: "pending",
+              requestedAt: {
+                $gt: graceCutoff,
+                $lte: now
+              }
+            },
+            {
+              $set: {
+                status: "cancelled",
+                cancelledAt: now,
+                updatedAt: now
+              }
+            }
+          );
+
+        if (result.modifiedCount !== 1) {
+          const latest = await requests.findOne(
+            { userId },
+            { projection: { status: 1 } }
+          );
+
+          return json({
+            success: false,
+            status: latest?.status || "unknown",
+            message:
+              latest?.status === "processing"
+                ? "Deletion has already started and can no longer be cancelled here."
+                : latest?.status === "completed"
+                  ? "The account deletion has already completed."
+                  : "This deletion request cannot currently be cancelled."
+          }, 409);
+        }
+
+        await users.updateOne(
+          { _id: userId },
+          {
+            $unset: {
+              deletionStatus: "",
+              deletionRequestedAt: ""
+            },
+            $set: { updatedAt: now }
+          }
+        );
+
+        return json({
+          success: true,
+          status: "cancelled",
+          message: "The account deletion request has been cancelled."
+        });
+      } catch (error) {
+        const message = String(error?.message || "");
+
+        if (
+          message.includes("Authentication required") ||
+          message.includes("Invalid token") ||
+          message.includes("Invalid authentication token") ||
+          message.includes("Token expired") ||
+          message.includes("Invalid user ID")
+        ) {
+          return json({
+            success: false,
+            message: "Please sign in with a valid account."
+          }, 401);
+        }
+
+        console.error("ACCOUNT DELETION CANCELLATION ERROR:", error);
+        return json({
+          success: false,
+          message: "Could not cancel the account deletion request."
+        }, 500);
+      }
+    }
+
+// ================= ACCOUNT DELETION REQUEST =================
+    if (
+      request.method === "DELETE" &&
+      url.pathname === "/api/account/delete"
+    ) {
+      try {
+        const database = await getDatabase(env);
+        const userId = await authenticate(request, env);
+        const users = database.collection("users");
+        const requests = database.collection("account_deletion_requests");
+        const now = new Date();
+
+        const user = await users.findOne({ _id: userId });
+
+        if (!user) {
+          return json({
+            success: false,
+            message: "Account not found.",
+          }, 404);
+        }
+
+        // Reuse the durable request record without losing cancellation history.
+        let deletionRequest = await requests.findOne({ userId });
+
+        if (!deletionRequest) {
+          await requests.updateOne(
+            { userId },
+            {
+              $setOnInsert: {
+                userId,
+                status: "pending",
+                requestedAt: now,
+                attempts: 0,
+                createdAt: now,
+              },
+              $set: { updatedAt: now },
+            },
+            { upsert: true }
+          );
+
+          deletionRequest = await requests.findOne({ userId });
+        }
+
+        if (!deletionRequest) {
+          throw new Error("Deletion request could not be confirmed.");
+        }
+
+        // Permit a new request after cancellation while preserving an audit entry.
+        if (deletionRequest.status === "cancelled") {
+          const previousRequest = {
+            status: "cancelled",
+            requestedAt: deletionRequest.requestedAt || null,
+            cancelledAt: deletionRequest.cancelledAt || null,
+            recordedAt: now,
+          };
+
+          await requests.updateOne(
+            { userId, status: "cancelled" },
+            {
+              $set: {
+                status: "pending",
+                requestedAt: now,
+                updatedAt: now,
+              },
+              $unset: {
+                cancelledAt: "",
+                completedAt: "",
+                reviewReason: "",
+              },
+              $push: { history: previousRequest },
+            }
+          );
+
+          deletionRequest = await requests.findOne({ userId });
+        }
+
+        if (!deletionRequest) {
+          throw new Error("Deletion request could not be confirmed.");
+        }
+
+        if (
+          deletionRequest.status === "completed" ||
+          deletionRequest.status === "cancelled"
+        ) {
+          return json({
+            success: false,
+            status: deletionRequest.status,
+            message: "This deletion request is no longer active.",
+          }, 409);
+        }
+
+        // Mark the account only after the request record is confirmed.
+        await users.updateOne(
+          { _id: userId },
+          {
+            $set: {
+              deletionStatus: deletionRequest.status,
+              deletionRequestedAt: deletionRequest.requestedAt,
+              updatedAt: now,
+            },
+          }
+        );
+
+        return json({
+          success: true,
+          status: deletionRequest.status,
+          message:
+            deletionRequest.status === "processing"
+              ? "Account deletion is already being processed."
+              : deletionRequest.status === "review_required"
+                ? "Account deletion requires review before it can continue."
+                : "Your account deletion request has been recorded. " +
+                  "Data cleanup has not yet been confirmed complete.",
+          requestedAt: deletionRequest.requestedAt,
+        }, 202);
+      } catch (error) {
+        const message = String(error?.message || "");
+
+        if (
+          message.includes("Authentication required") ||
+          message.includes("Invalid token") ||
+          message.includes("Invalid authentication token") ||
+          message.includes("Token expired") ||
+          message.includes("Invalid user ID")
+        ) {
+          return json({
+            success: false,
+            message: "Please sign in with a valid account before requesting deletion.",
+          }, 401);
+        }
+
+        console.error("ACCOUNT DELETION REQUEST ERROR:", error);
+
+        return json({
+          success: false,
+          message: "The deletion request could not be confirmed. Please try again.",
+        }, 500);
+      }
+    }
 
 if (
   request.method === "GET" &&
@@ -1456,6 +1835,28 @@ if (
   }
 }
   // ================= USERS =================
+
+/* ============================================================
+   ADMIN ACCOUNT DELETION PREVIEW — READ ONLY
+   GET /api/admin/account-deletions/preview?requestId=...
+   ============================================================ */
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/admin/account-deletions/preview"
+) {
+  return previewAdminAccountDeletion(request, env);
+}
+
+/* ============================================================
+   ADMIN ACCOUNT DELETIONS — READ ONLY
+   GET /api/admin/account-deletions
+   ============================================================ */
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/admin/account-deletions"
+) {
+  return listAdminAccountDeletions(request, env);
+}
 
 // GET USER PROFILE
 if (
@@ -2400,19 +2801,31 @@ if (
 
 // ================= ADVERTISEMENTS =================
 
-    // GET ADVERTISEMENT PRODUCTS
-    if (
-      request.method === "GET" &&
-      url.pathname === "/api/ads/products"
-    ) {
-      return await getAdvertisementProducts(
-        request,
-        env,
-        await getDatabase(env)
-      );
-    }
+// GET PUBLIC PAID ADVERTISEMENTS
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/ads/delivery"
+) {
+  return await getDeliverableAdvertisementCampaigns(
+    request,
+    env,
+    await getDatabase(env)
+  );
+}
 
-    // CREATE ADVERTISEMENT CAMPAIGN
+// GET ADVERTISEMENT PRODUCTS
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/ads/products"
+) {
+  return await getAdvertisementProducts(
+    request,
+    env,
+    await getDatabase(env)
+  );
+}
+
+// CREATE ADVERTISEMENT CAMPAIGN
     if (
       request.method === "POST" &&
       url.pathname === "/api/ads/campaigns"

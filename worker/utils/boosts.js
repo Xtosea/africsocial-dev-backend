@@ -284,82 +284,150 @@ export async function approveBoost(
   boostId,
   adminUserId
 ) {
-  const objectBoostId =
-    toObjectId(boostId);
-
-  const adminId =
-    toObjectId(adminUserId);
+  const objectBoostId = toObjectId(boostId);
+  const adminId = toObjectId(adminUserId);
 
   if (!objectBoostId) {
-    throw new Error(
-      "Invalid Boost ID."
-    );
+    throw new Error("Invalid Boost ID.");
   }
 
   if (!adminId) {
-    throw new Error(
-      "Invalid admin user ID."
-    );
+    throw new Error("Invalid admin user ID.");
   }
 
-  const boost =
-    await db.collection("boosts").findOne({
-      _id: objectBoostId,
-    });
+  const boost = await db.collection("boosts").findOne({
+    _id: objectBoostId,
+  });
 
   if (!boost) {
-    throw new Error(
-      "Boost not found."
-    );
+    throw new Error("Boost not found.");
   }
 
-  if (
-    boost.status !==
-    "pending_approval"
-  ) {
+  if (boost.status !== "pending_approval") {
     throw new Error(
       "Only pending Boosts can be approved."
     );
   }
 
-  const product =
-    getProduct(boost.productId);
+  // A Boost must have a valid owner and payment reference.
+  const boostUserId = toObjectId(boost.user);
 
-  if (!product) {
+  if (!boostUserId || !boost.transactionReference) {
     throw new Error(
-      "Boost product no longer exists."
+      "Boost ownership or payment reference could not be verified."
     );
   }
 
-  const startedAt =
-    new Date();
+  // Verify the original payment independently of the Boost record.
+  const payment = await db.collection("payments").findOne({
+    transactionReference: boost.transactionReference,
+  });
 
-  const expiresAt =
-    calculateBoostExpiry(
-      product,
-      startedAt
+  if (!payment) {
+    throw new Error(
+      "Boost payment record was not found. Approval is blocked."
     );
+  }
 
-  const result =
-    await db.collection("boosts").findOneAndUpdate(
-      {
-        _id: objectBoostId,
-        status: "pending_approval",
-      },
-      {
-        $set: {
-          status: "active",
-          startedAt,
-          expiresAt,
-          approvedBy: adminId,
-          approvedAt: startedAt,
-          updatedAt: startedAt,
-        },
-      },
-      {
-        returnDocument: "after",
-      }
+  if (
+    payment.status !== "paid" ||
+    String(toObjectId(payment.user)) !== String(boostUserId) ||
+    payment.productId !== boost.productId
+  ) {
+    throw new Error(
+      "Boost payment verification failed. Approval is blocked."
     );
+  }
+
+  // Do not approve payments awaiting financial or activation review.
+  if (
+    payment.accountDeletionReviewRequired === true ||
+    payment.accountDeletionReviewStatus === "pending" ||
+    payment.activationReviewRequired === true ||
+    payment.activationReviewStatus === "pending"
+  ) {
+    throw new Error(
+      "This Boost payment requires financial review. Approval is blocked."
+    );
+  }
+
+  // Verify the account still exists and is not undergoing deletion.
+  const owner = await db.collection("users").findOne(
+    { _id: boostUserId },
+    { projection: { deletionStatus: 1 } }
+  );
+
+  if (!owner) {
+    throw new Error(
+      "Boost account owner could not be found. Approval is blocked."
+    );
+  }
+
+  const deletionStatus = String(
+    owner.deletionStatus || ""
+  ).toLowerCase();
+
+  if (
+    ["requested", "pending", "processing", "review_required"].includes(
+      deletionStatus
+    )
+  ) {
+    throw new Error(
+      "This account has an active deletion process. Boost approval is blocked."
+    );
+  }
+
+  // Check the deletion-request collection independently because the
+  // user record and deletion request may temporarily be out of sync.
+  const deletionRequest = await db
+    .collection("account_deletion_requests")
+    .findOne({
+      userId: boostUserId,
+    });
+
+  if (
+    deletionRequest &&
+    String(deletionRequest.status || "").toLowerCase() !== "cancelled"
+  ) {
+    throw new Error(
+      "This account has an unresolved deletion request. Boost approval is blocked."
+    );
+  }
+
+  const product = getProduct(boost.productId);
+
+  if (!product || product.type !== "boost") {
+    throw new Error(
+      "Boost product no longer exists or is invalid."
+    );
+  }
+
+  const startedAt = new Date();
+
+  const expiresAt = calculateBoostExpiry(
+    product,
+    startedAt
+  );
+
+  const result = await db.collection("boosts").findOneAndUpdate(
+    {
+      _id: objectBoostId,
+      status: "pending_approval",
+    },
+    {
+      $set: {
+        status: "active",
+        startedAt,
+        expiresAt,
+        approvedBy: adminId,
+        approvedAt: startedAt,
+        updatedAt: startedAt,
+      },
+    },
+    {
+      returnDocument: "after",
+    }
+  );
 
   if (!result) {
     throw new Error(

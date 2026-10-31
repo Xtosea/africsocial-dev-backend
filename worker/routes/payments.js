@@ -1061,7 +1061,23 @@ export async function recoverPaystackCheckout(
       currentUser?.deletionStatus || ""
     ).toLowerCase();
 
-    if (["requested", "pending", "processing", "review_required"].includes(deletionStatus)) {
+    const deletionRequest = await db
+      .collection("account_deletion_requests")
+      .findOne({ userId });
+
+    const deletionRequestStatus = String(
+      deletionRequest?.status || "",
+    ).toLowerCase();
+
+    const deletionRequestBlocksCheckout =
+      Boolean(deletionRequest) &&
+      deletionRequestStatus !== "cancelled";
+
+
+    if (
+      ["requested", "pending", "processing", "review_required"].includes(deletionStatus) ||
+      deletionRequestBlocksCheckout
+    ) {
       return json({
         success: false,
         code: "ACCOUNT_DELETION_PENDING",
@@ -1294,7 +1310,7 @@ export async function verifyPaystackPayment(
       }, 400);
     }
 
-    await db.collection("payments").updateOne(
+    const paidUpdate = await db.collection("payments").updateOne(
       {
         transactionReference,
       },
@@ -1334,6 +1350,19 @@ export async function verifyPaystackPayment(
       }
     );
 
+    if (paidUpdate?.matchedCount !== 1) {
+      return json(
+        {
+          success: false,
+          verified: false,
+          activated: false,
+          message:
+            "Payment verification could not be recorded. No product was activated.",
+        },
+        503,
+      );
+    }
+
     const verifiedPayment = {
       ...payment,
       status: "paid",
@@ -1343,51 +1372,121 @@ export async function verifyPaystackPayment(
           : payment.gatewayReference,
     };
 
-    const currentUser = await db.collection("users").findOne(
-      { _id: userId },
-      { projection: { deletionStatus: 1 } }
-    );
-
-    const currentDeletionStatus = String(
-      currentUser?.deletionStatus || ""
-    ).toLowerCase();
-
-    if (
-      ["requested", "pending", "processing", "review_required"].includes(
-        currentDeletionStatus
-      )
-    ) {
-      await db.collection("payments").updateOne(
-        { transactionReference },
-        {
-          $set: {
-            accountDeletionReviewRequired: true,
-            accountDeletionReviewStatus: "pending",
-            accountDeletionReviewReason: "account_deletion_pending",
-            updatedAt: new Date(),
+    const recordDeletionReview = async (reason) => {
+      try {
+        const result = await db.collection("payments").updateOne(
+          { transactionReference, status: "paid" },
+          {
+            $set: {
+              accountDeletionReviewRequired: true,
+              accountDeletionReviewStatus: "pending",
+              accountDeletionReviewReason: reason,
+              updatedAt: new Date(),
+            },
           },
-        }
+        );
+
+        return result?.matchedCount === 1;
+      } catch (reviewError) {
+        console.error(
+          "ACCOUNT DELETION PAYMENT REVIEW UPDATE ERROR:",
+          reviewError,
+        );
+        return false;
+      }
+    };
+
+    const buildDeletionReviewResponse = (
+      reviewRecorded,
+      reason,
+    ) => {
+      const message = reviewRecorded
+        ? reason === "account_deletion_pending"
+          ? "Payment verified successfully, but account deletion is pending. The payment has been flagged for review; no new product was activated."
+          : "Payment verified successfully, but account-deletion status could not be confirmed. The payment is held for review; no new product was activated."
+        : "Payment was verified, but the required account-deletion review could not be recorded. No new product was activated; manual reconciliation is required.";
+
+      return json(
+        {
+          success: true,
+          verified: true,
+          activated: false,
+          requiresReview: true,
+          reviewRecorded,
+          message,
+          payment: {
+            transactionReference,
+            productId: payment.productId,
+            productType: payment.productType,
+            amount: payment.amount,
+            currency: payment.currency,
+            channel: gatewayData.channel || null,
+            status: "paid",
+            reviewStatus: reviewRecorded ? "pending" : "not_recorded",
+          },
+        },
+        reviewRecorded ? 202 : 503,
+      );
+    };
+
+    let currentUser;
+    let deletionRequest;
+
+    try {
+      currentUser = await db.collection("users").findOne(
+        { _id: userId },
+        { projection: { deletionStatus: 1 } },
       );
 
-      return json({
-        success: true,
-        verified: true,
-        activated: false,
-        requiresReview: true,
-        message:
-          "Payment verified successfully, but account deletion is pending. " +
-          "The payment has been flagged for review; no new product was activated.",
-        payment: {
-          transactionReference,
-          productId: payment.productId,
-          productType: payment.productType,
-          amount: payment.amount,
-          currency: payment.currency,
-          channel: gatewayData.channel || null,
-          status: "paid",
-          reviewStatus: "pending",
-        },
-      });
+      deletionRequest = await db
+        .collection("account_deletion_requests")
+        .findOne({ userId });
+    } catch (deletionLookupError) {
+      console.error(
+        "ACCOUNT DELETION STATUS CHECK ERROR:",
+        deletionLookupError,
+      );
+
+      const reviewRecorded = await recordDeletionReview(
+        "account_deletion_status_unavailable",
+      );
+
+      return buildDeletionReviewResponse(
+        reviewRecorded,
+        "account_deletion_status_unavailable",
+      );
+    }
+
+    const currentDeletionStatus = String(
+      currentUser?.deletionStatus || "",
+    ).toLowerCase();
+
+    const deletionRequestStatus = String(
+      deletionRequest?.status || "",
+    ).toLowerCase();
+
+    const userDeletionPending = [
+      "requested",
+      "pending",
+      "processing",
+      "review_required",
+    ].includes(currentDeletionStatus);
+
+    // A cancelled request does not block by itself. Any other existing
+    // request blocks activation unless the request has been cancelled.
+    const deletionRequestBlocksActivation =
+      Boolean(deletionRequest) &&
+      deletionRequestStatus !== "cancelled";
+
+    if (userDeletionPending || deletionRequestBlocksActivation) {
+      const reviewRecorded = await recordDeletionReview(
+        "account_deletion_pending",
+      );
+
+      return buildDeletionReviewResponse(
+        reviewRecorded,
+        "account_deletion_pending",
+      );
     }
 
     let activation;

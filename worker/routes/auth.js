@@ -244,10 +244,25 @@ export async function login(request, env, db) {
 
     
 
-        if (
-      ["requested", "pending", "processing"].includes(
+    if (
+      ["requested", "pending", "processing", "review_required"].includes(
         String(user.deletionStatus || "").toLowerCase()
       )
+    ) {
+      return json({
+        message: "This account has a pending deletion request.",
+      }, 403);
+    }
+
+    // The deletion request is authoritative even if the user record
+    // has not yet been synchronised.
+    const deletionRequest = await db
+      .collection("account_deletion_requests")
+      .findOne({ userId: user._id });
+
+    if (
+      deletionRequest &&
+      String(deletionRequest.status || "").toLowerCase() !== "cancelled"
     ) {
       return json({
         message: "This account has a pending deletion request.",

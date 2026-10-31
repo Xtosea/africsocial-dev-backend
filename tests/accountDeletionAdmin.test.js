@@ -24,6 +24,19 @@ const freshScenario = () => ({
   },
   pendingPayments: 0,
   pendingTransactions: 0,
+  creatorEarnings: {
+    pending: 0,
+    approved: 0,
+    paid: 0,
+    rejected: 0
+  },
+  withdrawals: {
+    pending: 0,
+    approved: 0,
+    paid: 0,
+    rejected: 0,
+    invalid: 0
+  },
   failedLookups: [],
   failedCounts: [],
   requestLookupCount: 0,
@@ -101,9 +114,18 @@ function buildDatabase() {
           return null;
         },
 
-        async countDocuments() {
+        async countDocuments(filter = {}) {
           if (scenario.failedCounts.includes(name)) {
             throw new Error("Simulated count failure");
+          }
+
+          if (name === "withdrawals") {
+            if (filter.status === "pending") return scenario.withdrawals.pending;
+            if (filter.status === "approved") return scenario.withdrawals.approved;
+            if (filter.status === "paid") return scenario.withdrawals.paid;
+            if (filter.status === "rejected") return scenario.withdrawals.rejected;
+            if (filter.$or) return scenario.withdrawals.invalid;
+            return 0;
           }
 
           if (name === "payments") {
@@ -112,6 +134,10 @@ function buildDatabase() {
 
           if (name === "transactions") {
             return scenario.pendingTransactions;
+          }
+
+          if (name === "creatorearnings") {
+            return scenario.creatorEarnings[filter.status] ?? 0;
           }
 
           return 0;
@@ -228,6 +254,69 @@ test("unresolved payments and transactions require review", async () => {
   assert.equal(body.financialReview.pendingPayments, 2);
   assert.equal(body.financialReview.pendingTransactions, 3);
   assert.equal(body.financialReview.required, true);
+  assert.equal(body.canProceed, false);
+});
+
+test("pending withdrawals require financial review", async () => {
+  scenario = freshScenario();
+  scenario.withdrawals.pending = 2;
+
+  const { body } = await runPreview();
+
+  assert.equal(body.financialReview.withdrawals.pending, 2);
+  assert.equal(body.financialReview.required, true);
+  assert.equal(body.canProceed, false);
+});
+
+test("approved withdrawals require financial review", async () => {
+  scenario = freshScenario();
+  scenario.withdrawals.approved = 1;
+
+  const { body } = await runPreview();
+
+  assert.equal(body.financialReview.withdrawals.approved, 1);
+  assert.equal(body.financialReview.required, true);
+  assert.equal(body.canProceed, false);
+});
+
+test("paid and rejected withdrawal counts are reported", async () => {
+  scenario = freshScenario();
+  scenario.withdrawals.paid = 3;
+  scenario.withdrawals.rejected = 2;
+
+  const { body } = await runPreview();
+
+  assert.equal(body.financialReview.withdrawals.paid, 3);
+  assert.equal(body.financialReview.withdrawals.rejected, 2);
+  assert.equal(body.canProceed, false);
+});
+
+test("invalid withdrawal records require financial review", async () => {
+  scenario = freshScenario();
+  scenario.withdrawals.invalid = 1;
+
+  const { body } = await runPreview();
+
+  assert.equal(body.financialReview.withdrawals.invalid, 1);
+  assert.equal(body.financialReview.required, true);
+  assert.equal(body.canProceed, false);
+});
+
+test("failed withdrawal checks are not treated as zero", async () => {
+  scenario = freshScenario();
+  scenario.failedCounts = ["withdrawals"];
+
+  const { body } = await runPreview();
+
+  assert.equal(body.checks.withdrawalPendingCheckAvailable, false);
+  assert.equal(body.checks.withdrawalApprovedCheckAvailable, false);
+  assert.equal(body.checks.withdrawalPaidCheckAvailable, false);
+  assert.equal(body.checks.withdrawalRejectedCheckAvailable, false);
+  assert.equal(body.checks.withdrawalInvalidCheckAvailable, false);
+  assert.equal(body.financialReview.withdrawalChecksAvailable, false);
+  assert.equal(body.financialReview.checksAvailable, false);
+  assert.equal(body.financialReview.required, true);
+  assert.equal(body.checks.allRequiredQueriesAvailable, false);
   assert.equal(body.canProceed, false);
 });
 
@@ -459,4 +548,63 @@ test("database initialisation failure returns a generic 500 response", async () 
   } finally {
     databaseFailure = null;
   }
+});
+
+
+test("pending creator earnings require financial review", async () => {
+  scenario = freshScenario();
+  scenario.creatorEarnings.pending = 2;
+
+  const result = await runPreview();
+  const review = result.body.financialReview;
+
+  assert.equal(review.creatorEarnings.pending, 2);
+  assert.equal(review.creatorEarnings.outstanding, 2);
+  assert.equal(review.creatorEarningsChecksAvailable, true);
+  assert.equal(review.required, true);
+  assert.equal(result.body.canProceed, false);
+  assert.equal(result.body.actualDeletionPerformed, false);
+});
+
+test("approved creator earnings require financial review", async () => {
+  scenario = freshScenario();
+  scenario.creatorEarnings.approved = 3;
+
+  const result = await runPreview();
+  const review = result.body.financialReview;
+
+  assert.equal(review.creatorEarnings.approved, 3);
+  assert.equal(review.creatorEarnings.outstanding, 3);
+  assert.equal(review.required, true);
+  assert.equal(result.body.canProceed, false);
+});
+
+test("paid and rejected creator earnings are not outstanding liabilities", async () => {
+  scenario = freshScenario();
+  scenario.creatorEarnings.paid = 4;
+  scenario.creatorEarnings.rejected = 2;
+
+  const result = await runPreview();
+  const review = result.body.financialReview;
+
+  assert.equal(review.creatorEarnings.paid, 4);
+  assert.equal(review.creatorEarnings.rejected, 2);
+  assert.equal(review.creatorEarnings.outstanding, 0);
+  assert.equal(review.required, false);
+  assert.equal(review.payoutSystemVerified, false);
+  assert.equal(result.body.canProceed, false);
+});
+
+test("unavailable creator earnings checks require review and block proceeding", async () => {
+  scenario = freshScenario();
+  scenario.failedCounts.push("creatorearnings");
+
+  const result = await runPreview();
+  const review = result.body.financialReview;
+
+  assert.equal(review.creatorEarningsChecksAvailable, false);
+  assert.equal(review.creatorEarnings.outstanding, null);
+  assert.equal(review.required, true);
+  assert.equal(result.body.checks.allRequiredQueriesAvailable, false);
+  assert.equal(result.body.canProceed, false);
 });

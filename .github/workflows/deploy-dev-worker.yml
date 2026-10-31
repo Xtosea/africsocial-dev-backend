@@ -58,6 +58,9 @@ jobs:
       - name: Test wallet deletion safeguards
         run: node --test tests/walletDeletionSafeguards.test.js
 
+      - name: Test Boost approval safeguards
+        run: node --test tests/boostDeletionApprovalSafeguards.test.js
+
       - name: Deploy development Worker
         run: npx wrangler@4.123.0 deploy
         env:

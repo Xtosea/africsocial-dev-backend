@@ -642,7 +642,7 @@ try {
 
         // Reconcile a previous cancellation if the user-record update failed.
         if (existing.status === "cancelled") {
-          await users.updateOne(
+          const userSyncResult = await users.updateOne(
             { _id: userId },
             {
               $unset: {
@@ -652,6 +652,10 @@ try {
               $set: { updatedAt: now }
             }
           );
+
+          if (userSyncResult.matchedCount !== 1) {
+            throw new Error("Account deletion cancellation could not be synchronised.");
+          }
 
           return json({
             success: true,
@@ -724,7 +728,7 @@ try {
           }, 409);
         }
 
-        await users.updateOne(
+        const userSyncResult = await users.updateOne(
           { _id: userId },
           {
             $unset: {
@@ -734,6 +738,10 @@ try {
             $set: { updatedAt: now }
           }
         );
+
+        if (userSyncResult.matchedCount !== 1) {
+          throw new Error("Account deletion cancellation could not be synchronised.");
+        }
 
         return json({
           success: true,
@@ -856,7 +864,7 @@ try {
         }
 
         // Mark the account only after the request record is confirmed.
-        await users.updateOne(
+        const userSyncResult = await users.updateOne(
           { _id: userId },
           {
             $set: {
@@ -866,6 +874,10 @@ try {
             },
           }
         );
+
+        if (userSyncResult.matchedCount !== 1) {
+          throw new Error("Account deletion request could not be synchronised.");
+        }
 
         return json({
           success: true,

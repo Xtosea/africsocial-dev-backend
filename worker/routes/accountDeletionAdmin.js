@@ -298,6 +298,15 @@ export async function previewAdminAccountDeletion(request, env) {
       walletResult,
       pendingPaymentsResult,
       pendingTransactionsResult,
+      withdrawalPendingResult,
+      withdrawalApprovedResult,
+      withdrawalPaidResult,
+      withdrawalRejectedResult,
+      withdrawalInvalidResult,
+      creatorEarningsPendingResult,
+      creatorEarningsApprovedResult,
+      creatorEarningsPaidResult,
+      creatorEarningsRejectedResult,
       postsResult,
       storiesResult,
       listingsResult,
@@ -340,6 +349,52 @@ export async function previewAdminAccountDeletion(request, env) {
         }
       }),
 
+      safeCount("withdrawals", {
+        user: { $in: ownerValues },
+        status: "pending"
+      }),
+
+      safeCount("withdrawals", {
+        user: { $in: ownerValues },
+        status: "approved"
+      }),
+
+      safeCount("withdrawals", {
+        user: { $in: ownerValues },
+        status: "paid"
+      }),
+
+      safeCount("withdrawals", {
+        user: { $in: ownerValues },
+        status: "rejected"
+      }),
+
+      safeCount("withdrawals", {
+        user: { $in: ownerValues },
+        $or: [
+          { status: { $nin: ["pending", "approved", "paid", "rejected"] } },
+          { amount: { $exists: false } },
+          { amount: { $not: { $type: "number" } } },
+          { amount: { $lte: 0 } }
+        ]
+      }),
+
+      safeCount("creatorearnings", {
+        creator: { $in: ownerValues },
+        status: "pending"
+      }),
+      safeCount("creatorearnings", {
+        creator: { $in: ownerValues },
+        status: "approved"
+      }),
+      safeCount("creatorearnings", {
+        creator: { $in: ownerValues },
+        status: "paid"
+      }),
+      safeCount("creatorearnings", {
+        creator: { $in: ownerValues },
+        status: "rejected"
+      }),
       safeCount("posts", {
         user: { $in: ownerValues }
       }),
@@ -412,11 +467,32 @@ export async function previewAdminAccountDeletion(request, env) {
       )
     );
 
+    const withdrawalChecksAvailable = Boolean(
+      withdrawalPendingResult.available &&
+      withdrawalApprovedResult.available &&
+      withdrawalPaidResult.available &&
+      withdrawalRejectedResult.available &&
+      withdrawalInvalidResult.available
+    );
+
+    const creatorEarningsChecksAvailable = Boolean(
+      creatorEarningsPendingResult.available &&
+      creatorEarningsApprovedResult.available &&
+      creatorEarningsPaidResult.available &&
+      creatorEarningsRejectedResult.available
+    );
+
+    const creatorEarningsOutstanding = creatorEarningsChecksAvailable
+      ? creatorEarningsPendingResult.count + creatorEarningsApprovedResult.count
+      : null;
+
     const knownFinancialChecksAvailable = Boolean(
       walletResult.available &&
       walletValuesValid &&
       pendingPaymentsResult.available &&
-      pendingTransactionsResult.available
+      pendingTransactionsResult.available &&
+      withdrawalChecksAvailable &&
+      creatorEarningsChecksAvailable
     );
 
     const financialReviewRequired = Boolean(
@@ -429,12 +505,31 @@ export async function previewAdminAccountDeletion(request, env) {
       !knownFinancialChecksAvailable ||
       walletHasOutstandingValue ||
       (
+        creatorEarningsChecksAvailable &&
+        (
+          creatorEarningsPendingResult.count > 0 ||
+          creatorEarningsApprovedResult.count > 0
+        )
+      ) ||
+      (
         pendingPaymentsResult.available &&
         pendingPaymentsResult.count > 0
       ) ||
       (
         pendingTransactionsResult.available &&
         pendingTransactionsResult.count > 0
+      ) ||
+      (
+        withdrawalPendingResult.available &&
+        withdrawalPendingResult.count > 0
+      ) ||
+      (
+        withdrawalApprovedResult.available &&
+        withdrawalApprovedResult.count > 0
+      ) ||
+      (
+        withdrawalInvalidResult.available &&
+        withdrawalInvalidResult.count > 0
       )
     );
 
@@ -444,6 +539,14 @@ export async function previewAdminAccountDeletion(request, env) {
       marketplaceListings: listingsResult.count,
       messagesInvolvingAccount: messagesResult.count,
       notifications: notificationsResult.count
+    };
+
+    const withdrawalCounts = {
+      pending: withdrawalPendingResult.count,
+      approved: withdrawalApprovedResult.count,
+      paid: withdrawalPaidResult.count,
+      rejected: withdrawalRejectedResult.count,
+      invalid: withdrawalInvalidResult.count
     };
 
     const allRecordCountsAvailable = [
@@ -459,6 +562,8 @@ export async function previewAdminAccountDeletion(request, env) {
       walletResult.available &&
       pendingPaymentsResult.available &&
       pendingTransactionsResult.available &&
+      withdrawalChecksAvailable &&
+      creatorEarningsChecksAvailable &&
       allRecordCountsAvailable
     );
 
@@ -541,6 +646,16 @@ export async function previewAdminAccountDeletion(request, env) {
         unresolvedPayments: pendingPaymentsResult.count,
         pendingTransactions: pendingTransactionsResult.count,
         unresolvedTransactions: pendingTransactionsResult.count,
+        withdrawals: withdrawalCounts,
+        creatorEarnings: {
+          pending: creatorEarningsPendingResult.count,
+          approved: creatorEarningsApprovedResult.count,
+          paid: creatorEarningsPaidResult.count,
+          rejected: creatorEarningsRejectedResult.count,
+          outstanding: creatorEarningsOutstanding
+        },
+        creatorEarningsChecksAvailable,
+        withdrawalChecksAvailable,
         payoutSystemVerified,
         note:
           "Unresolved payments require reconciliation but are not automatically money owed to the account holder. Lifetime earnings are historical and are not treated as outstanding liabilities. Payout verification remains incomplete until independently verified."
@@ -554,6 +669,17 @@ export async function previewAdminAccountDeletion(request, env) {
         walletLookupAvailable: walletResult.available,
         paymentCheckAvailable: pendingPaymentsResult.available,
         transactionCheckAvailable: pendingTransactionsResult.available,
+        withdrawalPendingCheckAvailable: withdrawalPendingResult.available,
+        withdrawalApprovedCheckAvailable: withdrawalApprovedResult.available,
+        withdrawalPaidCheckAvailable: withdrawalPaidResult.available,
+        withdrawalRejectedCheckAvailable: withdrawalRejectedResult.available,
+        withdrawalInvalidCheckAvailable: withdrawalInvalidResult.available,
+        withdrawalChecksAvailable,
+        creatorEarningsPendingCheckAvailable: creatorEarningsPendingResult.available,
+        creatorEarningsApprovedCheckAvailable: creatorEarningsApprovedResult.available,
+        creatorEarningsPaidCheckAvailable: creatorEarningsPaidResult.available,
+        creatorEarningsRejectedCheckAvailable: creatorEarningsRejectedResult.available,
+        creatorEarningsChecksAvailable,
         postsCheckAvailable: postsResult.available,
         storiesCheckAvailable: storiesResult.available,
         marketplaceCheckAvailable: listingsResult.available,

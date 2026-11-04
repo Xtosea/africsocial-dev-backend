@@ -52,16 +52,20 @@ function base64UrlDecode(value) {
 }
 
 async function verifyJWT(token, secret) {
+  const unauthorized = (message) => {
+    const error = new Error(message);
+    error.status = 401;
+    return error;
+  };
+
   if (!token) {
-    throw new Error(
-      "Authentication required"
-    );
+    throw unauthorized("Authentication required");
   }
 
   const parts = token.split(".");
 
   if (parts.length !== 3) {
-    throw new Error("Invalid token");
+    throw unauthorized("Invalid token");
   }
 
   const [
@@ -70,11 +74,10 @@ async function verifyJWT(token, secret) {
     encodedSignature,
   ] = parts;
 
-  const encoder =
-    new TextEncoder();
+  try {
+    const encoder = new TextEncoder();
 
-  const key =
-    await crypto.subtle.importKey(
+    const key = await crypto.subtle.importKey(
       "raw",
       encoder.encode(secret),
       {
@@ -85,14 +88,12 @@ async function verifyJWT(token, secret) {
       ["verify"]
     );
 
-  const signature =
-    Uint8Array.from(
+    const signature = Uint8Array.from(
       base64UrlDecode(encodedSignature),
       char => char.charCodeAt(0)
     );
 
-  const valid =
-    await crypto.subtle.verify(
+    const valid = await crypto.subtle.verify(
       "HMAC",
       key,
       signature,
@@ -101,31 +102,40 @@ async function verifyJWT(token, secret) {
       )
     );
 
-  if (!valid) {
-    throw new Error("Invalid token");
-  }
+    if (!valid) {
+      throw unauthorized("Invalid token");
+    }
 
-  const payload =
-    JSON.parse(
-      base64UrlDecode(
-        encodedPayload
-      )
+    const payload = JSON.parse(
+      base64UrlDecode(encodedPayload)
     );
 
-  if (
-    payload.exp &&
-    payload.exp <
-      Math.floor(Date.now() / 1000)
-  ) {
-    throw new Error(
-      "Token expired"
-    );
-  }
-
-  return payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+  throw unauthorized("Invalid token");
 }
 
-async function authenticateAdmin(
+if (
+  Object.prototype.hasOwnProperty.call(payload, "exp") &&
+  (
+    typeof payload.exp !== "number" ||
+    !Number.isFinite(payload.exp) ||
+    payload.exp <= Math.floor(Date.now() / 1000)
+  )
+) {
+  throw unauthorized("Token expired or invalid");
+}
+
+    return payload;
+  } catch (error) {
+    if (error.status === 401) {
+      throw error;
+    }
+
+    throw unauthorized("Invalid token");
+  }
+}
+
+export async function authenticateAdmin(
   request,
   env,
   db

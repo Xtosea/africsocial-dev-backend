@@ -122,6 +122,14 @@ import {
   createStoryMusic,
 } from "./routes/storyMusic.js";
 import { getR2SignedUploadUrl, uploadStoryMusicToR2 } from "./routes/r2.js";
+import {
+  sendMessage,
+  getMessages,
+  editMessage,
+  deleteMessageForMe,
+  deleteMessageForEveryone,
+} from "./routes/messages.js";
+
 import { getDatabase, withFreshDatabase } from "./utils/db.js";
 
 import { ensureApplicationIndexes } from "./utils/indexes.js";
@@ -145,6 +153,11 @@ import {
   approveBoostAdmin,
   rejectBoostAdmin,
 } from "./routes/adminBoosts.js";
+import {
+  getPendingAdvertisementCampaigns,
+  approveAdvertisementCampaign,
+  rejectAdvertisementCampaign,
+} from "./routes/adminAdvertisements.js";
 import { authenticate } from "./utils/auth.js";
 import {
   listCurrencies,
@@ -330,6 +343,76 @@ async function handleRequest(request, env, ctx) {
         timestamp: new Date().toISOString(),
       });
     }
+
+  // ================= MESSAGING API =================
+
+  const runMessageRoute = async (handler, ...args) => {
+    try {
+      const database = await getDatabase(env);
+      return await handler(request, env, database, ...args);
+    } catch (error) {
+      console.error("MESSAGING ROUTE ERROR:", error);
+      return json({
+        error: error?.message || "Messaging request failed",
+      }, 500);
+    }
+  };
+
+  // SEND MESSAGE
+  if (
+    request.method === "POST" &&
+    pathname === "/api/messages"
+  ) {
+    return await runMessageRoute(sendMessage);
+  }
+
+  // GET, EDIT, AND DELETE MESSAGES
+  const messagePathMatch = pathname.match(
+    /^\/api\/messages\/([^/]+)(\/everyone)?$/
+  );
+
+  if (messagePathMatch) {
+    const [, messageId, deleteEveryoneSuffix] = messagePathMatch;
+
+    if (request.method === "GET" && !deleteEveryoneSuffix) {
+      return await runMessageRoute(
+        getMessages,
+        messageId
+      );
+    }
+
+    if (request.method === "PUT" && !deleteEveryoneSuffix) {
+      return await runMessageRoute(
+        editMessage,
+        messageId
+      );
+    }
+
+    // Match /everyone before the general DELETE route.
+    if (
+      request.method === "DELETE" &&
+      deleteEveryoneSuffix === "/everyone"
+    ) {
+      return await runMessageRoute(
+        deleteMessageForEveryone,
+        messageId
+      );
+    }
+
+    if (
+      request.method === "DELETE" &&
+      !deleteEveryoneSuffix
+    ) {
+      return await runMessageRoute(
+        deleteMessageForMe,
+        messageId
+      );
+    }
+
+    return json({
+      error: "Method not allowed",
+    }, 405);
+  }
 
   // ================= PRODUCT CATALOG =================
 
@@ -1313,7 +1396,82 @@ try {
       }
     }
 
-    // ================= ADMIN WALLET USER SEARCH =================
+    // ================= ADMIN ADVERTISEMENT MANAGEMENT =================
+
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/admin/advertisements"
+) {
+  try {
+    return await withFreshDatabase(env, async (database) => {
+      return await getPendingAdvertisementCampaigns(
+        request,
+        env,
+        database
+      );
+    });
+  } catch (error) {
+    console.error("ADMIN ADVERTISEMENTS ROUTE ERROR:", error);
+    return json({
+      success: false,
+      error: error.message || "Failed to load pending advertisements.",
+    }, 500);
+  }
+}
+
+if (
+  request.method === "POST" &&
+  url.pathname.startsWith("/api/admin/advertisements/") &&
+  url.pathname.endsWith("/approve")
+) {
+  try {
+    const parts = url.pathname.split("/");
+    const campaignId = parts[4];
+
+    return await withFreshDatabase(env, async (database) => {
+      return await approveAdvertisementCampaign(
+        request,
+        env,
+        database,
+        campaignId
+      );
+    });
+  } catch (error) {
+    console.error("ADMIN ADVERTISEMENT APPROVE ROUTE ERROR:", error);
+    return json({
+      success: false,
+      error: error.message || "Failed to approve advertisement.",
+    }, 500);
+  }
+}
+
+if (
+  request.method === "POST" &&
+  url.pathname.startsWith("/api/admin/advertisements/") &&
+  url.pathname.endsWith("/reject")
+) {
+  try {
+    const parts = url.pathname.split("/");
+    const campaignId = parts[4];
+
+    return await withFreshDatabase(env, async (database) => {
+      return await rejectAdvertisementCampaign(
+        request,
+        env,
+        database,
+        campaignId
+      );
+    });
+  } catch (error) {
+    console.error("ADMIN ADVERTISEMENT REJECT ROUTE ERROR:", error);
+    return json({
+      success: false,
+      error: error.message || "Failed to reject advertisement.",
+    }, 500);
+  }
+}
+
+// ================= ADMIN WALLET USER SEARCH =================
 
 if (
   request.method === "GET" &&

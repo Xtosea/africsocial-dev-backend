@@ -39,29 +39,22 @@ export async function activateVerifiedAdvertisement(db, payment) {
     throw new Error("Payment contains an invalid user ID.");
   }
 
-  /*
-   * Idempotency:
-   * If this payment has already activated a campaign,
-   * return the existing campaign.
-   */
-  const existingCampaign = await db
-    .collection("advertisement_campaigns")
-    .findOne({
-      paymentReference: payment.transactionReference,
-    });
+  const campaigns = db.collection("advertisement_campaigns");
+
+  // Idempotency: this payment may already have been processed.
+  const existingCampaign = await campaigns.findOne({
+    paymentReference: payment.transactionReference,
+    advertiserId: userId,
+  });
 
   if (existingCampaign) {
     return {
-      activated: true,
+      activated: existingCampaign.status === "active",
       alreadyActivated: true,
       campaign: serializeAdvertisementCampaign(existingCampaign),
     };
   }
 
-  /*
-   * The advertisement campaign should have been created
-   * before payment and linked to this transaction reference.
-   */
   const campaignId = payment.advertisementCampaignId;
 
   if (!campaignId) {
@@ -70,7 +63,7 @@ export async function activateVerifiedAdvertisement(db, payment) {
     );
   }
 
-  const campaign = await db.collection("advertisement_campaigns").findOne({
+  const campaign = await campaigns.findOne({
     _id: campaignId,
     advertiserId: userId,
   });
@@ -79,60 +72,63 @@ export async function activateVerifiedAdvertisement(db, payment) {
     throw new Error("Advertisement campaign not found.");
   }
 
-  const now = new Date();
-
-  const durationDays = Number(product.durationDays);
-
-  if (!Number.isInteger(durationDays) || durationDays <= 0) {
-    throw new Error("Advertisement product has an invalid duration.");
+  if (
+    campaign.status !== "pending_payment" ||
+    campaign.paymentStatus !== "unpaid"
+  ) {
+    throw new Error(
+      "Advertisement campaign is not awaiting payment."
+    );
   }
 
-  const endDate = new Date(now);
-  endDate.setDate(endDate.getDate() + durationDays);
+  const now = new Date();
 
-  const updateResult = await db
-    .collection("advertisement_campaigns")
-    .updateOne(
-      {
-        _id: campaign._id,
-        advertiserId: userId,
-        paymentStatus: { $ne: "paid" },
-      },
-      {
-        $set: {
-          paymentStatus: "paid",
-          paymentReference: payment.transactionReference,
-          paymentGatewayReference: payment.gatewayReference || null,
-          paymentProvider: payment.provider || "paystack",
-          paidAmount: payment.amount,
-          currency: payment.currency || "NGN",
-          status: "active",
-          startDate: now,
-          endDate,
-          updatedAt: now,
-          activatedAt: now,
-        },
-      }
-    );
-
-  /*
-   * Another request may have activated the campaign first.
-   * Re-read it so the endpoint remains idempotent.
-   */
-  const activatedCampaign = await db
-    .collection("advertisement_campaigns")
-    .findOne({
+  const updateResult = await campaigns.updateOne(
+    {
       _id: campaign._id,
-    });
+      advertiserId: userId,
+      status: "pending_payment",
+      paymentStatus: "unpaid",
+    },
+    {
+      $set: {
+        paymentStatus: "paid",
+        paymentReference: payment.transactionReference,
+        paymentGatewayReference: payment.gatewayReference || null,
+        paymentProvider: payment.provider || "paystack",
+        paidAmount: payment.amount,
+        currency: payment.currency || "NGN",
+        status: "pending_approval",
+        startDate: null,
+        endDate: null,
+        updatedAt: now,
+      },
+    }
+  );
 
-  if (!activatedCampaign) {
-    throw new Error("Advertisement campaign could not be activated.");
+  // Re-read after updating to handle concurrent verification requests.
+  const updatedCampaign = await campaigns.findOne({
+    _id: campaign._id,
+    advertiserId: userId,
+  });
+
+  if (!updatedCampaign) {
+    throw new Error("Advertisement campaign could not be retrieved.");
+  }
+
+  if (
+    updatedCampaign.paymentReference !== payment.transactionReference ||
+    updatedCampaign.paymentStatus !== "paid"
+  ) {
+    throw new Error(
+      "Advertisement campaign payment could not be confirmed."
+    );
   }
 
   return {
-    activated: updateResult.modifiedCount > 0,
+    activated: updatedCampaign.status === "active",
     alreadyActivated: updateResult.modifiedCount === 0,
-    campaign: serializeAdvertisementCampaign(activatedCampaign),
+    campaign: serializeAdvertisementCampaign(updatedCampaign),
   };
 }
 

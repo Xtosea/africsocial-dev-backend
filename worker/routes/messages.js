@@ -14,6 +14,25 @@ function json(data, status = 200) {
   });
 }
 
+function getErrorStatus(error) {
+  const authErrors = [
+    "Authentication required",
+    "Invalid token",
+    "Token expired",
+    "Invalid authentication token",
+    "Invalid user ID",
+  ];
+
+  if (
+    authErrors.includes(error?.message) ||
+    error?.name === "InvalidCharacterError"
+  ) {
+    return 401;
+  }
+
+  return 500;
+}
+
 /* ================= SEND MESSAGE ================= */
 
 export async function sendMessage(
@@ -136,9 +155,7 @@ export async function sendMessage(
       error
     );
 
-    return json({
-      error: error.message,
-    }, 500);
+    return json({ error: error.message }, getErrorStatus(error));
   }
 }
 
@@ -176,6 +193,9 @@ export async function getMessages(
               receiver: currentUserId,
             },
           ],
+          deletedFor: {
+            $nin: [currentUserId.toString()],
+          },
         })
         .sort({
           createdAt: 1,
@@ -236,9 +256,7 @@ export async function getMessages(
       error
     );
 
-    return json({
-      error: error.message,
-    }, 500);
+    return json({ error: error.message }, getErrorStatus(error));
   }
 }
 
@@ -335,9 +353,7 @@ export async function editMessage(
       error
     );
 
-    return json({
-      error: error.message,
-    }, 500);
+    return json({ error: error.message }, getErrorStatus(error));
   }
 }
 
@@ -409,9 +425,7 @@ export async function deleteMessageForMe(
       error
     );
 
-    return json({
-      error: error.message,
-    }, 500);
+    return json({ error: error.message }, getErrorStatus(error));
   }
 }
 
@@ -484,8 +498,6 @@ export async function deleteMessageForEveryone(
       error
     );
 
-    return json({
-      error: error.message,
-    }, 500);
+    return json({ error: error.message }, getErrorStatus(error));
   }
 }

@@ -22,6 +22,8 @@ export async function paystackRequest(
     `${PAYSTACK_BASE_URL}${endpoint}`,
     {
       ...options,
+      signal:
+        options.signal || AbortSignal.timeout(30_000),
       headers: {
         Authorization: `Bearer ${env.PAYSTACK_SECRET_KEY}`,
         "Content-Type": "application/json",

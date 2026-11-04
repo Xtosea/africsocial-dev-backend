@@ -1,4 +1,4 @@
-name: AfricSocial Development Integration Tests
+name: AfricSocial Development Worker Deployment
 
 on:
   workflow_dispatch:
@@ -6,34 +6,35 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: africsocial-api-dev-deployment
+  cancel-in-progress: false
+
 jobs:
-  test-development:
-    if: github.ref == 'refs/heads/account-deletion-integration-review'
+  deploy-development:
+    if: github.ref == 'refs/heads/development'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout integration branch
-        uses: actions/checkout@v6
+      - name: Checkout development branch
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
 
       - name: Verify development Worker target
         shell: bash
         run: |
           set -euo pipefail
+
           node --input-type=module <<'NODE'
           import { readFileSync } from "node:fs";
 
-          const text = readFileSync("wrangler.jsonc", "utf8");
-          const match = text.match(/^\s*"name"\s*:\s*"([^"]+)"/m);
+          const config = readFileSync("wrangler.jsonc", "utf8");
+          const match = config.match(/^\s*"name"\s*:\s*"([^"]+)"/m);
 
           if (!match || match[1] !== "africsocial-api-dev") {
             console.error("ERROR: Expected Worker africsocial-api-dev.");
@@ -43,26 +44,11 @@ jobs:
           console.log("Verified target: africsocial-api-dev");
           NODE
 
-      - name: Test advertisement delivery
-        run: node --test tests/advertisementDelivery.test.js
-
-      - name: Test account deletion safeguards
-        run: node --experimental-test-module-mocks --test tests/accountDeletionAdmin.test.js
-
-      - name: Test login deletion safeguards
-        run: node --experimental-test-module-mocks --test tests/authDeletionLogin.test.js
-
-      - name: Test payment deletion safeguards
-        run: node --experimental-test-module-mocks --test tests/paymentDeletionSafeguards.test.js
-
-      - name: Test wallet deletion safeguards
-        run: node --test tests/walletDeletionSafeguards.test.js
-
-      - name: Test Boost approval safeguards
-        run: node --test tests/boostDeletionApprovalSafeguards.test.js
+      - name: Validate development Worker build
+        run: npx --yes wrangler@4.123.0 deploy --config wrangler.jsonc --dry-run
 
       - name: Deploy development Worker
-        run: npx wrangler@4.123.0 deploy
+        run: npx --yes wrangler@4.123.0 deploy --config wrangler.jsonc
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

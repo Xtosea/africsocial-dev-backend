@@ -61,6 +61,63 @@ function generatePaymentReference() {
   return `AFS-${Date.now()}-${random}`;
 }
 
+
+function existingAdvertisementCheckoutResponse(
+  existingPayment,
+  product
+) {
+  const authorizationUrl =
+    existingPayment.gatewayResponse?.authorization_url || null;
+
+  if (!authorizationUrl) {
+    return json({
+      success: false,
+      code: "ADVERTISEMENT_PAYMENT_INITIALIZING",
+      message:
+        "A payment for this campaign is already being initialized. Please wait before trying again.",
+    }, 409);
+  }
+
+  return json({
+    success: true,
+    reusedExistingCheckout: true,
+    payment: {
+      transactionReference:
+        existingPayment.transactionReference,
+      productId: product.id,
+      productName: product.name,
+      productType: product.type,
+      amount: existingPayment.amount,
+      currency: existingPayment.currency,
+      authorizationUrl,
+      accessCode:
+        existingPayment.gatewayResponse?.access_code || null,
+      reference:
+        existingPayment.gatewayReference ||
+        existingPayment.transactionReference,
+      hasExistingPremium: false,
+    },
+  });
+}
+
+async function releaseAdvertisementPaymentLock(db, lock) {
+  if (!lock) return;
+
+  await db.collection("advertisement_campaigns").updateOne(
+    {
+      _id: lock.campaignId,
+      advertiserId: lock.advertiserId,
+      paymentInitializationLockToken: lock.token,
+    },
+    {
+      $unset: {
+        paymentInitializationLockToken: "",
+        paymentInitializationLockExpiresAt: "",
+      },
+    }
+  );
+}
+
 /**
  * Convert a major currency amount to the smallest
  * currency unit used by Paystack.
@@ -95,6 +152,8 @@ export async function initializePaystackPayment(
   env,
   db
 ) {
+  let advertisementPaymentLock = null;
+
   try {
     const userId = await authenticate(
       request,
@@ -146,7 +205,7 @@ export async function initializePaystackPayment(
 
     const currency = "NGN";
 
-    const amount = getProductPrice(
+    let amount = getProductPrice(
       productId,
       currency
     );
@@ -161,6 +220,7 @@ export async function initializePaystackPayment(
 
     let targetPostId = null;
     let boostConfig = null;
+    let advertisementCampaignId = null;
 
     if (product.type === "boost") {
       const rawTargetPostId =
@@ -452,7 +512,223 @@ export async function initializePaystackPayment(
         startMode: normalizedStartMode,
         scheduledStart: normalizedScheduledStart,
       };
-    } else if (product.type !== "premium") {
+    } else if (product.type === "advertisement") {
+      const rawCampaignId =
+        typeof body?.advertisementCampaignId === "string"
+          ? body.advertisementCampaignId.trim()
+          : "";
+
+      if (!ObjectId.isValid(rawCampaignId)) {
+        return json({
+          success: false,
+          code: "INVALID_ADVERTISEMENT_CAMPAIGN",
+          message: "A valid advertisement campaign ID is required.",
+        }, 400);
+      }
+
+      advertisementCampaignId = new ObjectId(rawCampaignId);
+
+      const campaign = await db.collection("advertisement_campaigns").findOne({
+        _id: advertisementCampaignId,
+        advertiserId: userId,
+      });
+
+      if (!campaign) {
+        return json({
+          success: false,
+          code: "ADVERTISEMENT_CAMPAIGN_NOT_FOUND",
+          message: "Advertisement campaign not found or you do not own it.",
+        }, 404);
+      }
+
+      if (
+        campaign.status !== "pending_payment" ||
+        campaign.paymentStatus !== "unpaid"
+      ) {
+        return json({
+          success: false,
+          code: "ADVERTISEMENT_CAMPAIGN_NOT_PAYABLE",
+          message: "This advertisement campaign is not awaiting payment.",
+        }, 409);
+      }
+
+      if (
+        campaign.productId !== product.id ||
+        campaign.productType !== "advertisement" ||
+        campaign.currency !== currency
+      ) {
+        return json({
+          success: false,
+          code: "ADVERTISEMENT_CAMPAIGN_PRODUCT_MISMATCH",
+          message: "The selected payment product does not match this campaign.",
+        }, 400);
+      }
+
+      const campaignAmount = Number(campaign.amount);
+
+      if (
+        !Number.isFinite(campaignAmount) ||
+        campaignAmount <= 0 ||
+        (product.customAmountAllowed !== true && campaignAmount !== amount) ||
+        (product.customAmountAllowed === true &&
+          campaignAmount < Number(product.minimumAmount || 0))
+      ) {
+        return json({
+          success: false,
+          code: "ADVERTISEMENT_CAMPAIGN_AMOUNT_INVALID",
+          message: "The campaign amount does not match the selected product.",
+        }, 400);
+      }
+
+      amount = campaignAmount;
+
+      // Acquire an atomic lock on this individual campaign.
+      // Different campaigns can initialise payments independently.
+      const lockToken = crypto.randomUUID();
+      const lockAcquiredAt = new Date();
+      const lockExpiresAt = new Date(
+        lockAcquiredAt.getTime() + 2 * 60 * 1000
+      );
+
+      const lockResult = await db.collection(
+        "advertisement_campaigns"
+      ).updateOne(
+        {
+          _id: advertisementCampaignId,
+          advertiserId: userId,
+          status: "pending_payment",
+          paymentStatus: "unpaid",
+          $or: [
+            {
+              paymentInitializationLockExpiresAt: {
+                $exists: false,
+              },
+            },
+            {
+              paymentInitializationLockExpiresAt: {
+                $lte: lockAcquiredAt,
+              },
+            },
+          ],
+        },
+        {
+          $set: {
+            paymentInitializationLockToken: lockToken,
+            paymentInitializationLockExpiresAt: lockExpiresAt,
+          },
+        }
+      );
+
+      if (lockResult.modifiedCount !== 1) {
+        const latestCampaign = await db.collection(
+          "advertisement_campaigns"
+        ).findOne({
+          _id: advertisementCampaignId,
+          advertiserId: userId,
+        });
+
+        if (
+          !latestCampaign ||
+          latestCampaign.status !== "pending_payment" ||
+          latestCampaign.paymentStatus !== "unpaid"
+        ) {
+          return json({
+            success: false,
+            code: "ADVERTISEMENT_CAMPAIGN_NOT_PAYABLE",
+            message:
+              "This advertisement campaign is not awaiting payment.",
+          }, 409);
+        }
+
+        const concurrentPayment = await db.collection(
+          "payments"
+        ).findOne(
+          {
+            user: new ObjectId(userId),
+            advertisementCampaignId,
+            productId: product.id,
+            productType: "advertisement",
+            currency,
+            status: "pending",
+          },
+          { sort: { createdAt: -1 } }
+        );
+
+        if (concurrentPayment?.gatewayResponse?.authorization_url) {
+          return existingAdvertisementCheckoutResponse(
+            concurrentPayment,
+            product
+          );
+        }
+
+        return json({
+          success: false,
+          code: "ADVERTISEMENT_PAYMENT_INITIALIZING",
+          message:
+            "A payment for this campaign is already being initialized. Please wait before trying again.",
+        }, 409);
+      }
+
+      advertisementPaymentLock = {
+        campaignId: advertisementCampaignId,
+        advertiserId: userId,
+        token: lockToken,
+      };
+
+      // Check again after acquiring the lock. This closes the race
+      // between the initial lookup and atomic lock acquisition.
+      const existingCampaignPayment = await db.collection(
+        "payments"
+      ).findOne(
+        {
+          user: new ObjectId(userId),
+          advertisementCampaignId,
+          productId: product.id,
+          productType: "advertisement",
+          currency,
+          status: "pending",
+        },
+        { sort: { createdAt: -1 } }
+      );
+
+      if (existingCampaignPayment) {
+        const existingAuthorizationUrl =
+          existingCampaignPayment.gatewayResponse?.authorization_url ||
+          null;
+
+        if (existingAuthorizationUrl) {
+          await releaseAdvertisementPaymentLock(
+            db,
+            advertisementPaymentLock
+          );
+          advertisementPaymentLock = null;
+
+          return existingAdvertisementCheckoutResponse(
+            existingCampaignPayment,
+            product
+          );
+        }
+
+        // Never assume an old pending payment failed merely because
+        // its checkout URL was not saved. Paystack may have received it.
+        // Preserve its reference and block duplicate initialisation
+        // until the original transaction has been reconciled.
+        await releaseAdvertisementPaymentLock(
+          db,
+          advertisementPaymentLock
+        );
+        advertisementPaymentLock = null;
+
+        return json({
+          success: false,
+          code: "ADVERTISEMENT_PAYMENT_RECONCILIATION_REQUIRED",
+          transactionReference:
+            existingCampaignPayment.transactionReference,
+          message:
+            "An earlier payment attempt has an uncertain outcome. Please contact support for payment reconciliation before trying again.",
+        }, 409);
+      }
+        } else if (product.type !== "premium") {
       return json({
         success: false,
         code: "PRODUCT_NOT_READY",
@@ -469,11 +745,9 @@ export async function initializePaystackPayment(
      * Later, users will be allowed to intentionally stack
      * Premium plans.
      */
-    const existingSubscription =
-      await getActivePremiumSubscription(
-        db,
-        userId
-      );
+    const existingSubscription = product.type === "premium"
+      ? await getActivePremiumSubscription(db, userId)
+      : null;
 
     const transactionReference =
       generatePaymentReference();
@@ -497,6 +771,8 @@ export async function initializePaystackPayment(
       productType: product.type,
 
       targetPostId,
+
+      advertisementCampaignId,
 
       amount,
 
@@ -566,6 +842,12 @@ export async function initializePaystackPayment(
                       targetPostId.toString(),
                   }
                 : {}),
+              ...(advertisementCampaignId
+                ? {
+                    advertisementCampaignId:
+                      advertisementCampaignId.toString(),
+                  }
+                : {}),
             }),
           }
         );
@@ -605,6 +887,19 @@ export async function initializePaystackPayment(
         }
       );
 
+      try {
+        await releaseAdvertisementPaymentLock(
+          db,
+          advertisementPaymentLock
+        );
+        advertisementPaymentLock = null;
+      } catch (lockReleaseError) {
+        console.error(
+          "ADVERTISEMENT PAYMENT LOCK RELEASE ERROR:",
+          lockReleaseError
+        );
+      }
+
       return json({
         success: true,
 
@@ -638,23 +933,40 @@ export async function initializePaystackPayment(
         },
       });
     } catch (paystackError) {
+      const advertisementOutcomeIsUncertain =
+        product.type === "advertisement";
+
       await db.collection("payments").updateOne(
         {
           transactionReference,
+          status: "pending",
         },
         {
           $set: {
-            status: "failed",
+            // A network or timeout error does not prove Paystack
+            // failed to create the transaction.
+            status: advertisementOutcomeIsUncertain
+              ? "pending"
+              : "failed",
 
-            gatewayStatus: "initialize_failed",
+            gatewayStatus: advertisementOutcomeIsUncertain
+              ? "initialization_unknown"
+              : "initialize_failed",
 
-            gatewayResponse:
-              paystackError?.paystackResponse ||
-              {
-                message:
-                  paystackError?.message ||
-                  "Paystack initialization failed.",
-              },
+            gatewayResponse: {
+              outcome: advertisementOutcomeIsUncertain
+                ? "unknown"
+                : "failed",
+              message:
+                paystackError?.message ||
+                "Paystack initialization failed.",
+              ...(paystackError?.paystackResponse
+                ? {
+                    paystackResponse:
+                      paystackError.paystackResponse,
+                  }
+                : {}),
+            },
 
             updatedAt: new Date(),
           },
@@ -664,6 +976,21 @@ export async function initializePaystackPayment(
       throw paystackError;
     }
   } catch (error) {
+    if (advertisementPaymentLock) {
+      try {
+        await releaseAdvertisementPaymentLock(
+          db,
+          advertisementPaymentLock
+        );
+        advertisementPaymentLock = null;
+      } catch (lockReleaseError) {
+        console.error(
+          "ADVERTISEMENT PAYMENT LOCK CLEANUP ERROR:",
+          lockReleaseError
+        );
+      }
+    }
+
     console.error(
       "PAYSTACK INITIALIZE ERROR:",
       error
@@ -888,10 +1215,18 @@ export async function verifyPaystackPayment(
             db,
             verifiedPayment
           )
-        : await activateVerifiedPayment(
-            db,
-            verifiedPayment
-          );
+        : payment.productType === "advertisement"
+          ? await activateVerifiedAdvertisement(
+              db,
+              verifiedPayment
+            )
+          : await activateVerifiedPayment(
+              db,
+              verifiedPayment
+            );
+
+    const isAdvertisement =
+      payment.productType === "advertisement";
 
     return json({
       success: true,
@@ -900,8 +1235,9 @@ export async function verifyPaystackPayment(
       alreadyActivated:
         activation.alreadyActivated,
 
-      message:
-        activation.alreadyActivated
+      message: isAdvertisement
+        ? "Payment verified successfully. Your advertisement campaign is awaiting admin approval."
+        : activation.alreadyActivated
           ? "Payment verified successfully. Premium was already activated."
           : "Payment verified successfully and Premium has been activated.",
 
@@ -927,10 +1263,17 @@ export async function verifyPaystackPayment(
             boost:
               activation.boost,
           }
-        : {
-            subscription:
-              activation.subscription,
-          }),
+        : isAdvertisement
+          ? {
+              advertisementCampaign:
+                activation.campaign,
+              campaignStatus:
+                activation.campaign?.status || null,
+            }
+          : {
+              subscription:
+                activation.subscription,
+            }),
     });
   } catch (error) {
     console.error(

@@ -110,5 +110,27 @@ export async function ensureApplicationIndexes(db) {
     }
   );
 
+
+  // ------------------------------------------------------------
+  // NOTIFICATIONS / MISSED CALLS
+  // ------------------------------------------------------------
+  await db.collection("notifications").createIndex(
+    { recipient: 1, type: 1, createdAt: -1 },
+    { name: "notifications_recipient_type_createdAt" }
+  );
+
+  // Prevent duplicate missed-call notifications.
+  await db.collection("notifications").createIndex(
+    { callId: 1 },
+    {
+      unique: true,
+      partialFilterExpression: {
+        type: "MISSED_CALL",
+        callId: { $type: "string" },
+      },
+      name: "missed_calls_unique_callId",
+    }
+  );
+
   return true;
 }

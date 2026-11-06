@@ -324,3 +324,104 @@ export async function getR2SignedUploadUrl(request, env) {
     );
   }
 }
+
+// ================= REEL MEDIA SIGNED UPLOAD =================
+
+export async function getReelMediaSignedUploadUrl(request, env) {
+  try {
+    const userId = await authenticate(request, env);
+
+    const contentType = (
+      new URL(request.url).searchParams.get("contentType") || ""
+    ).toLowerCase();
+
+    const allowedTypes = {
+      "video/mp4": "mp4",
+      "video/webm": "webm",
+      "video/quicktime": "mov",
+      "video/x-m4v": "m4v",
+      "video/3gpp": "3gp",
+      "image/jpeg": "jpg",
+      "image/png": "png",
+      "image/webp": "webp",
+    };
+
+    const extension = allowedTypes[contentType];
+
+    if (!extension) {
+      return json({
+        success: false,
+        error: "Unsupported Reel media content type",
+      }, 400);
+    }
+
+    if (
+      !env.R2_ACCOUNT_ID ||
+      !env.R2_ACCESS_KEY_ID ||
+      !env.R2_SECRET_ACCESS_KEY ||
+      !env.R2_BUCKET_NAME ||
+      !env.R2_CUSTOM_DOMAIN
+    ) {
+      console.error("Reel upload: R2 configuration is incomplete");
+
+      return json({
+        success: false,
+        error: "R2 upload service is not fully configured",
+      }, 500);
+    }
+
+    const endpoint =
+      `https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+
+    const s3 = new S3Client({
+      region: "auto",
+      endpoint,
+      credentials: {
+        accessKeyId: env.R2_ACCESS_KEY_ID,
+        secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+      },
+    });
+
+    const randomPart = crypto.randomUUID().replace(/-/g, "");
+
+    const fileName =
+      `reels/${userId.toString()}/${Date.now()}-${randomPart}.${extension}`;
+
+    const command = new PutObjectCommand({
+      Bucket: env.R2_BUCKET_NAME,
+      Key: fileName,
+      ContentType: contentType,
+    });
+
+    const uploadUrl = await getSignedUrl(s3, command, {
+      expiresIn: 300,
+    });
+
+    const customDomain =
+      env.R2_CUSTOM_DOMAIN.replace(/\/+$/, "");
+
+    return json({
+      success: true,
+      uploadUrl,
+      fileUrl: `${customDomain}/${fileName}`,
+      fileName,
+      contentType,
+      expiresIn: 300,
+    });
+  } catch (error) {
+    console.error("Reel media signed URL error:", error);
+
+    const authError = [
+      "Authentication required",
+      "Invalid token",
+      "Token expired",
+      "Invalid authentication token",
+      "Invalid user ID",
+    ].includes(error.message);
+
+    return json({
+      success: false,
+      error: error.message || "Failed to create Reel upload URL",
+    }, authError ? 401 : 500);
+  }
+}

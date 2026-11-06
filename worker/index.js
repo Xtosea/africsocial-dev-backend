@@ -121,7 +121,7 @@ import {
   getStoryMusic,
   createStoryMusic,
 } from "./routes/storyMusic.js";
-import { getR2SignedUploadUrl, uploadStoryMusicToR2 } from "./routes/r2.js";
+import { getR2SignedUploadUrl, uploadStoryMusicToR2, getReelMediaSignedUploadUrl } from "./routes/r2.js";
 import {
   sendMessage,
   getMessages,
@@ -2014,6 +2014,15 @@ if (
   url.pathname === "/api/r2/signed-url"
 ) {
   return getR2SignedUploadUrl(request, env);
+}
+
+// ================= R2 REEL MEDIA SIGNED UPLOAD =================
+
+if (
+  request.method === "GET" &&
+  url.pathname === "/api/r2/video-signed-url"
+) {
+  return getReelMediaSignedUploadUrl(request, env);
 }
 
 if (

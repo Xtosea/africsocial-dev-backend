@@ -359,7 +359,7 @@ export async function getReelMediaSignedUploadUrl(request, env) {
       !env.R2_ACCOUNT_ID ||
       !env.R2_ACCESS_KEY_ID ||
       !env.R2_SECRET_ACCESS_KEY ||
-      !env.R2_BUCKET_NAME ||
+      !env.REELS_R2_BUCKET_NAME ||
       !env.R2_CUSTOM_DOMAIN
     ) {
       console.error("Reel upload: R2 configuration is incomplete");
@@ -388,7 +388,7 @@ export async function getReelMediaSignedUploadUrl(request, env) {
       `reels/${userId.toString()}/${Date.now()}-${randomPart}.${extension}`;
 
     const command = new PutObjectCommand({
-      Bucket: env.R2_BUCKET_NAME,
+      Bucket: env.REELS_R2_BUCKET_NAME,
       Key: fileName,
       ContentType: contentType,
     });

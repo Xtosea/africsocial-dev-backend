@@ -1533,7 +1533,61 @@ export async function createReel(
       videoUrl,
       thumbnailUrl,
       durationSeconds,
+      music,
+      stickers,
     } = body;
+
+    const isHttpsUrl = (value) => {
+      try {
+        return typeof value === "string" &&
+          new URL(value).protocol === "https:";
+      } catch {
+        return false;
+      }
+    };
+
+    const reelMusic =
+      music && typeof music === "object" && !Array.isArray(music) &&
+      isHttpsUrl(music.audioUrl)
+        ? {
+            ...(music._id ? { _id: String(music._id).slice(0, 100) } : {}),
+            title: String(music.title || "Untitled").slice(0, 150),
+            artist: String(music.artist || "").slice(0, 150),
+            audioUrl: music.audioUrl,
+            ...(isHttpsUrl(music.coverUrl)
+              ? { coverUrl: music.coverUrl }
+              : {}),
+          }
+        : null;
+
+    const clamp = (value, min, max, fallback) => {
+      const number = Number(value);
+      return Number.isFinite(number)
+        ? Math.min(max, Math.max(min, number))
+        : fallback;
+    };
+
+    const reelStickers = Array.isArray(stickers)
+      ? stickers.slice(0, 20)
+          .filter((sticker) =>
+            sticker &&
+            typeof sticker === "object" &&
+            !Array.isArray(sticker) &&
+            typeof sticker.url === "string" &&
+            (sticker.url.startsWith("/stickers/") ||
+              isHttpsUrl(sticker.url))
+          )
+          .map((sticker) => ({
+            id: String(sticker.id || "").slice(0, 100),
+            name: String(sticker.name || "").slice(0, 100),
+            url: sticker.url,
+            category: String(sticker.category || "").slice(0, 60),
+            x: clamp(sticker.x, 0, 1000, 120),
+            y: clamp(sticker.y, 0, 1000, 120),
+            scale: clamp(sticker.scale, 0.4, 3, 1),
+            rotation: clamp(sticker.rotation, -360, 360, 0),
+          }))
+      : [];
 
     const duration = Number(durationSeconds);
 
@@ -1569,6 +1623,8 @@ export async function createReel(
           thumbnailUrl: thumbnailUrl || "",
         },
       ],
+      music: reelMusic,
+      stickers: reelStickers,
       type: "video",
       likes: [],
       reactions: [],

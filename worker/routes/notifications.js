@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { withFreshDatabase } from "../utils/db.js";
 import { authenticate } from "../utils/auth.js";
+import { createPostAccessChecker } from "../utils/postAccess.js";
 
 function corsHeaders() {
   return {
@@ -127,8 +128,22 @@ export async function getNotifications(request, env) {
           thumbnailUrl: 1,
           user: 1,
           createdAt: 1,
+          visibility: 1,
+          isSharedPost: 1,
+          sharedFrom: 1,
         })
         .toArray();
+
+      const access = createPostAccessChecker(db, userId);
+      const visiblePosts = [];
+
+      for (const post of posts) {
+        if (await access.canViewPost(post)) {
+          visiblePosts.push(post);
+        }
+      }
+
+      posts = visiblePosts;
     }
 
     const postUserIds = posts

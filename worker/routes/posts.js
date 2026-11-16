@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { getDatabase, debugDbOperation, withDatabaseRetry, withFreshDatabase } from "../utils/db.js";
 import { authenticate } from "../utils/auth.js";
+import { createPostAccessChecker } from "../utils/postAccess.js";
 
 function corsHeaders() {
   return {
@@ -360,10 +361,20 @@ export async function createPost(request, env) {
       title,
       category,
       tags,
+      visibility,
     } = body;
+
+    const postVisibility = visibility === undefined
+      ? "public"
+      : visibility;
+
+    if (!["public", "friends", "private"].includes(postVisibility)) {
+      return json({ error: "Invalid post visibility" }, 400);
+    }
 
     const post = {
       user: userId,
+      visibility: postVisibility,
       content: content || "",
       media: Array.isArray(media) ? media : [],
       type: type || "text",
@@ -440,7 +451,7 @@ export async function getPosts(request, env) {
 
     console.log("[FEED] getPosts started");
 
-    await authenticate(request, env);
+    const userId = await authenticate(request, env);
 
     console.log("[FEED] authentication passed", {
       durationMs: Date.now() - feedStartedAt,
@@ -481,6 +492,7 @@ export async function getPosts(request, env) {
             originalAuthor: 1,
             isSharedPost: 1,
             sharedFrom: 1,
+            visibility: 1,
             title: 1,
             content: 1,
             media: 1,
@@ -519,13 +531,29 @@ export async function getPosts(request, env) {
       .limit(limit)
       .toArray();
 
+    const access = createPostAccessChecker(db, userId);
+    const visiblePosts = [];
+
+    for (const post of posts) {
+      if (await access.canViewPost(post)) {
+        visiblePosts.push(post);
+      }
+    }
+
+    console.log("[FEED] privacy filtering passed", {
+      postsBeforeFiltering: posts.length,
+      postsAfterFiltering: visiblePosts.length,
+    });
+
+    const filteredPosts = visiblePosts;
+
     console.log("[FEED] posts query passed", {
       postsFound: posts.length,
       durationMs: Date.now() - feedStartedAt,
     });
 
     const populatedPosts =
-      await populatePosts(db, posts);
+      await populatePosts(db, filteredPosts);
 
     console.log("[FEED] populatePosts passed", {
       postsFound: populatedPosts.length,
@@ -561,7 +589,10 @@ export async function getUserPosts(
   userId
 ) {
   try {
-    await authenticate(request, env);
+    const authHeader = request.headers.get("Authorization") || "";
+    const viewerId = authHeader
+      ? await authenticate(request, env)
+      : null;
 
     if (!validId(userId)) {
       return json({
@@ -573,12 +604,23 @@ export async function getUserPosts(
       env,
       async (db) => {
 
-    const posts = await db.collection("posts")
+    let posts = await db.collection("posts")
       .find({
         user: new ObjectId(userId),
       })
       .sort({ createdAt: -1 })
       .toArray();
+
+        const access = createPostAccessChecker(db, viewerId);
+        const visiblePosts = [];
+
+        for (const post of posts) {
+          if (await access.canViewPost(post)) {
+            visiblePosts.push(post);
+          }
+        }
+
+        posts = visiblePosts;
 
         return json(
       await populatePosts(db, posts)
@@ -607,7 +649,10 @@ export async function getTrending(
   env
 ) {
   try {
-    await authenticate(request, env);
+    const authHeader = request.headers.get("Authorization") || "";
+    const viewerId = authHeader
+      ? await authenticate(request, env)
+      : null;
 
     const db = await getDatabase(env);
     const url = new URL(request.url);
@@ -624,7 +669,7 @@ export async function getTrending(
         50
       );
 
-    const posts = await db.collection("posts")
+    let posts = await db.collection("posts")
       .find(
         {},
         {
@@ -634,6 +679,7 @@ export async function getTrending(
             originalAuthor: 1,
             isSharedPost: 1,
             sharedFrom: 1,
+            visibility: 1,
             title: 1,
             content: 1,
             media: 1,
@@ -671,6 +717,17 @@ export async function getTrending(
       .skip((page - 1) * limit)
       .limit(limit)
       .toArray();
+
+    const access = createPostAccessChecker(db, viewerId);
+    const visiblePosts = [];
+
+    for (const post of posts) {
+      if (await access.canViewPost(post)) {
+        visiblePosts.push(post);
+      }
+    }
+
+    posts = visiblePosts;
 
     posts.sort((a, b) => {
       const scoreA =
@@ -712,6 +769,11 @@ export async function getPost(
   postId
 ) {
   try {
+    const authHeader = request.headers.get("Authorization") || "";
+    const viewerId = authHeader
+      ? await authenticate(request, env)
+      : null;
+
     if (!validId(postId)) {
       return json({
         error: "Invalid post ID",
@@ -731,6 +793,14 @@ export async function getPost(
       }, 404);
     }
 
+    const access = createPostAccessChecker(db, viewerId);
+
+    if (!(await access.canViewPost(post))) {
+      return json({
+        error: "Post not found",
+      }, 404);
+    }
+
     const populated =
       await populatePosts(db, [post]);
 
@@ -744,10 +814,9 @@ export async function getPost(
 
     return json({
       error: err.message,
-    }, 500);
+    }, isAuthError(err) ? 401 : 500);
   }
 }
-
 /* ================= LIKE ================= */
 
 export async function likePost(
@@ -777,6 +846,12 @@ export async function likePost(
       return json({
         error: "Post not found",
       }, 404);
+    }
+
+    const access = createPostAccessChecker(db, userId);
+
+    if (!(await access.canViewPost(post))) {
+      return json({ error: "Post not found" }, 404);
     }
 
     const likes = Array.isArray(post.likes)
@@ -882,7 +957,7 @@ export async function sharePost(
   postId
 ) {
   try {
-    await authenticate(request, env);
+    const userId = await authenticate(request, env);
 
     if (!validId(postId)) {
       return json({
@@ -892,6 +967,20 @@ export async function sharePost(
 
     const db = await getDatabase(env);
     const id = new ObjectId(postId);
+
+    const post = await db.collection("posts").findOne({
+      _id: id,
+    });
+
+    if (!post) {
+      return json({ error: "Post not found" }, 404);
+    }
+
+    const access = createPostAccessChecker(db, userId);
+
+    if (!(await access.canViewPost(post))) {
+      return json({ error: "Post not found" }, 404);
+    }
 
     const result =
       await db.collection("posts").findOneAndUpdate(
@@ -962,6 +1051,12 @@ export async function savePost(
       return json({
         error: "Post not found",
       }, 404);
+    }
+
+    const access = createPostAccessChecker(db, userId);
+
+    if (!(await access.canViewPost(post))) {
+      return json({ error: "Post not found" }, 404);
     }
 
     const savedBy =
@@ -1210,6 +1305,12 @@ export async function viewPost(
       }, 404);
     }
 
+    const access = createPostAccessChecker(db, userId);
+
+    if (!(await access.canViewPost(post))) {
+      return json({ error: "Post not found" }, 404);
+    }
+
     const viewedBy =
       Array.isArray(post.viewedBy)
         ? post.viewedBy
@@ -1329,6 +1430,12 @@ export async function commentPost(
       }, 404);
     }
 
+    const access = createPostAccessChecker(db, userId);
+
+    if (!(await access.canViewPost(post))) {
+      return json({ error: "Post not found" }, 404);
+    }
+
     const comment = {
       _id: new ObjectId(),
       user: userId,
@@ -1408,8 +1515,17 @@ export async function getSavedPosts(
       .sort({ createdAt: -1 })
       .toArray();
 
+    const access = createPostAccessChecker(db, userId);
+    const visiblePosts = [];
+
+    for (const post of posts) {
+      if (await access.canViewPost(post)) {
+        visiblePosts.push(post);
+      }
+    }
+
     return json(
-      await populatePosts(db, posts)
+      await populatePosts(db, visiblePosts)
     );
 
   } catch (err) {
@@ -1455,6 +1571,12 @@ export async function sharePostToFeed(
       return json({
         error: "Post not found",
       }, 404);
+    }
+
+    const access = createPostAccessChecker(db, userId);
+
+    if (!(await access.canViewPost(original))) {
+      return json({ error: "Post not found" }, 404);
     }
 
     const newPost = {
@@ -1535,7 +1657,16 @@ export async function createReel(
       durationSeconds,
       music,
       stickers,
+      visibility,
     } = body;
+
+    const reelVisibility = visibility === undefined
+      ? "public"
+      : visibility;
+
+    if (!["public", "friends", "private"].includes(reelVisibility)) {
+      return json({ error: "Invalid reel visibility" }, 400);
+    }
 
     const isHttpsUrl = (value) => {
       try {
@@ -1613,6 +1744,7 @@ export async function createReel(
 
     const reel = {
       user: userId,
+      visibility: reelVisibility,
       content: caption || "",
       isReel: true,
       durationSeconds: duration,
@@ -1672,6 +1804,11 @@ export async function getReels(
   env
 ) {
   try {
+    const authHeader = request.headers.get("Authorization") || "";
+    const viewerId = authHeader
+      ? await authenticate(request, env)
+      : null;
+
     const url = new URL(request.url);
 
     const page =
@@ -1706,7 +1843,16 @@ return await withFreshDatabase(
 
         console.log("[REELS] Starting populatePosts");
 
-        const populated = await populatePosts(db, reels);
+        const access = createPostAccessChecker(db, viewerId);
+        const visibleReels = [];
+
+        for (const reel of reels) {
+          if (await access.canViewPost(reel)) {
+            visibleReels.push(reel);
+          }
+        }
+
+        const populated = await populatePosts(db, visibleReels);
 
         console.log("[REELS] populatePosts completed");
 
@@ -1722,7 +1868,7 @@ return await withFreshDatabase(
 
     return json({
       error: err.message,
-    }, 500);
+    }, isAuthError(err) ? 401 : 500);
   }
 }
 /* ================= REEL VIEW ================= */
@@ -1755,6 +1901,11 @@ export async function viewReel(
       return json({
         error: "Reel not found",
       }, 404);
+    }
+
+    const access = createPostAccessChecker(db, userId);
+    if (!(await access.canViewPost(reel))) {
+      return json({ error: "Reel not found" }, 404);
     }
 
     const viewedBy =
@@ -1884,6 +2035,11 @@ export async function recordReelWatch(
       return json({
         error: "Reel not found",
       }, 404);
+    }
+
+    const access = createPostAccessChecker(db, viewerId);
+    if (!(await access.canViewPost(reel))) {
+      return json({ error: "Reel not found" }, 404);
     }
 
     const creatorId = reel.user;

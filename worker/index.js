@@ -131,6 +131,7 @@ import {
 } from "./routes/messages.js";
 
 import { getDatabase, withFreshDatabase } from "./utils/db.js";
+import { getSocialPreview } from "./routes/socialPreview.js";
 
 import { ensureApplicationIndexes } from "./utils/indexes.js";
 import { listProducts } from "./utils/products.js";
@@ -267,7 +268,15 @@ async function handleRequest(request, env, ctx) {
     }
 
     // ============================================================
-    // SOCKET TICKET / WEBSOCKET ROUTING
+    // SOCIAL POST PREVIEW
+  if (
+    request.method === "GET" &&
+    /^\/post\/[^/]+\/?$/.test(pathname)
+  ) {
+    return await getSocialPreview(request, env);
+  }
+
+  // SOCKET TICKET / WEBSOCKET ROUTING
     // ============================================================
 
     if (

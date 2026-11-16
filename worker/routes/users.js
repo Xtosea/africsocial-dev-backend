@@ -726,7 +726,15 @@ export async function updateUser(
       "hubby",
       "profilePic",
       "coverPhoto",
+      "isPrivate",
     ];
+
+    if (
+      Object.prototype.hasOwnProperty.call(body, "isPrivate") &&
+      typeof body.isPrivate !== "boolean"
+    ) {
+      return json({ error: "isPrivate must be a Boolean" }, 400);
+    }
 
     const updates = {};
 

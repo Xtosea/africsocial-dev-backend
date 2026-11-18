@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ObjectId } from "mongodb";
 import { serveProtectedMedia } from "../worker/routes/protectedMedia.js";
+import { createMediaAccessToken } from "../worker/utils/mediaAccessToken.js";
 
 const ownerId = new ObjectId();
 const viewerId = new ObjectId();
@@ -36,8 +37,9 @@ function makeBucket() {
   };
 }
 
-function makeDependencies({ posts = [], story = null, canView = true } = {}) {
+function makeDependencies({ posts = [], story = null, canView = true, authenticate = async () => viewerId } = {}) {
   const bucket = makeBucket();
+  const accessViewerIds = [];
 
   const db = {
     collection(name) {
@@ -79,19 +81,21 @@ function makeDependencies({ posts = [], story = null, canView = true } = {}) {
 
   return {
     bucket,
-    authenticate: async () => viewerId,
+    authenticate,
+    accessViewerIds,
     getDatabase: async () => db,
-    createPostAccessChecker: () => ({
-      canViewPost: async () => canView,
-    }),
+    createPostAccessChecker: (_db, checkedViewerId) => {
+      accessViewerIds.push(checkedViewerId);
+      return { canViewPost: async () => canView };
+    },
   };
 }
 
-function makeRequest(key, method = "GET") {
-  return new Request(
-    `https://dev.example.com/api/media?key=${encodeURIComponent(key)}`,
-    { method }
-  );
+function makeRequest(key, method = "GET", accessToken = null) {
+  const url = new URL("https://dev.example.com/api/media");
+  url.searchParams.set("key", key);
+  if (accessToken) url.searchParams.set("access_token", accessToken);
+  return new Request(url, { method });
 }
 
 test("serves a public Reel through its protected media URL", async () => {
@@ -257,5 +261,80 @@ test("uses bucket HEAD without downloading the media body", async () => {
 
   assert.equal(response.status, 200);
   assert.equal(deps.bucket.calls.head, 1);
+  assert.equal(deps.bucket.calls.get, 0);
+});
+
+
+test("authorises friends-only media with a valid key-scoped access token", async () => {
+  const post = {
+    _id: new ObjectId(),
+    user: ownerId,
+    visibility: "friends",
+    media: [{ key: reelKey }],
+  };
+  const secret = "test-media-token-secret-that-is-at-least-32-characters";
+  const token = await createMediaAccessToken({
+    secret,
+    key: reelKey,
+    viewerId: String(viewerId),
+  });
+  const deps = makeDependencies({ posts: [post], canView: true, authenticate: async () => null });
+
+  const response = await serveProtectedMedia(
+    makeRequest(reelKey, "GET", token),
+    { JWT_SECRET: secret },
+    deps
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Cache-Control"), "private, no-store");
+  assert.equal(deps.bucket.calls.get, 1);
+  assert.equal(String(deps.accessViewerIds[0]), String(viewerId));
+});
+
+test("rejects a media access token issued for a different key", async () => {
+  const post = {
+    _id: new ObjectId(),
+    user: ownerId,
+    visibility: "friends",
+    media: [{ key: reelKey }],
+  };
+  const secret = "test-media-token-secret-that-is-at-least-32-characters";
+  const token = await createMediaAccessToken({
+    secret,
+    key: `${reelKey}.different`,
+    viewerId: String(viewerId),
+  });
+  const deps = makeDependencies({ posts: [post], canView: false, authenticate: async () => null });
+
+  const response = await serveProtectedMedia(
+    makeRequest(reelKey, "GET", token),
+    { JWT_SECRET: secret },
+    deps
+  );
+
+  assert.equal(response.status, 404);
+  assert.equal(deps.accessViewerIds.length, 1);
+  assert.equal(deps.accessViewerIds[0], null);
+  assert.equal(deps.bucket.calls.get, 0);
+});
+
+test("rejects an invalid media access token without serving the object", async () => {
+  const post = {
+    _id: new ObjectId(),
+    user: ownerId,
+    visibility: "friends",
+    media: [{ key: reelKey }],
+  };
+  const deps = makeDependencies({ posts: [post], canView: false, authenticate: async () => null });
+
+  const response = await serveProtectedMedia(
+    makeRequest(reelKey, "GET", "not-a-valid-token"),
+    { JWT_SECRET: "test-media-token-secret-that-is-at-least-32-characters" },
+    deps
+  );
+
+  assert.equal(response.status, 404);
+  assert.equal(deps.accessViewerIds[0], null);
   assert.equal(deps.bucket.calls.get, 0);
 });

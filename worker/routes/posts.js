@@ -3,6 +3,7 @@ import { getDatabase, debugDbOperation, withDatabaseRetry, withFreshDatabase } f
 import { authenticate } from "../utils/auth.js";
 import { createPostAccessChecker } from "../utils/postAccess.js";
 import { getStoryMediaKeys } from "../utils/storyMedia.js";
+import { signProtectedReelMediaUrl } from "../utils/reelMediaAccess.js";
 
 function corsHeaders() {
   return {
@@ -1839,65 +1840,101 @@ export async function getReels(
       : null;
 
     const url = new URL(request.url);
-
-    const page =
-      Math.max(
-        Number(url.searchParams.get("page")) || 1,
-        1
-      );
-
+    const page = Math.max(
+      Number(url.searchParams.get("page")) || 1,
+      1
+    );
     const limit = 5;
 
-    console.log("[REELS] Before withDatabaseRetry");
+    return await withFreshDatabase(env, async (db) => {
+      const reels = await db.collection("posts")
+        .find({ isReel: true })
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .toArray();
 
-return await withFreshDatabase(
-  env,
-  async (db) => {
-        console.log("[REELS] Database received");
+      const access = createPostAccessChecker(db, viewerId);
+      const visibleReels = [];
 
-        console.log("[REELS] Starting posts query");
+      for (const reel of reels) {
+        if (await access.canViewPost(reel)) {
+          visibleReels.push(reel);
+        }
+      }
 
-        const reels = await db.collection("posts")
-          .find({
-            isReel: true,
-          })
-          .sort({ createdAt: -1 })
-          .skip((page - 1) * limit)
-          .limit(limit)
-          .toArray();
+      // Identify private accounts without exposing isPrivate in populated users.
+      const authorIds = [
+        ...new Set(
+          visibleReels
+            .map(reel => String(reel.user || ""))
+            .filter(id => ObjectId.isValid(id))
+        ),
+      ];
 
-        console.log("[REELS] Posts query completed", {
-          count: reels.length,
+      const authors = authorIds.length
+        ? await db.collection("users")
+            .find({
+              _id: {
+                $in: authorIds.map(id => new ObjectId(id)),
+              },
+            })
+            .project({ isPrivate: 1 })
+            .toArray()
+        : [];
+
+      const privateAuthorIds = new Set(
+        authors
+          .filter(author => author.isPrivate === true)
+          .map(author => String(author._id))
+      );
+
+      const protectedReelIds = new Set(
+        visibleReels
+          .filter(reel =>
+            (reel.visibility && reel.visibility !== "public") ||
+            privateAuthorIds.has(String(reel.user)) ||
+            reel.isSharedPost === true
+          )
+          .map(reel => String(reel._id))
+      );
+
+      const populated = await populatePosts(db, visibleReels);
+
+      // Browser media elements cannot send the normal Bearer token.
+      // Sign only protected Reel media URLs.
+      const signReelMediaUrl = value =>
+        signProtectedReelMediaUrl(value, {
+          viewerId,
+          secret: env.JWT_SECRET,
         });
 
-        console.log("[REELS] Starting populatePosts");
-
-        const access = createPostAccessChecker(db, viewerId);
-        const visibleReels = [];
-
-        for (const reel of reels) {
-          if (await access.canViewPost(reel)) {
-            visibleReels.push(reel);
+      const responseReels = await Promise.all(
+        populated.map(async reel => {
+          if (!protectedReelIds.has(String(reel._id)) || !viewerId) {
+            return reel;
           }
-        }
 
-        const populated = await populatePosts(db, visibleReels);
+          const media = await Promise.all(
+            (Array.isArray(reel.media) ? reel.media : []).map(async item => ({
+              ...item,
+              url: await signReelMediaUrl(item.url),
+              thumbnailUrl: await signReelMediaUrl(item.thumbnailUrl),
+            }))
+          );
 
-        console.log("[REELS] populatePosts completed");
+          return { ...reel, media };
+        })
+      );
 
-        return json(populated);
-      }
-    );
-
+      return json(responseReels);
+    });
   } catch (err) {
-    console.error(
-      "GET REELS ERROR:",
-      err
+    console.error("GET REELS ERROR:", err);
+    return json(
+      { error: err.message },
+      isAuthError(err) ? 401 : 500
     );
-
-    return json({
-      error: err.message,
-    }, isAuthError(err) ? 401 : 500);
   }
 }
 /* ================= REEL VIEW ================= */

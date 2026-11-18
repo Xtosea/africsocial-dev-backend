@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { authenticate } from "../utils/auth.js";
 import { getDatabase } from "../utils/db.js";
 import { createPostAccessChecker } from "../utils/postAccess.js";
+import { verifyMediaAccessToken } from "../utils/mediaAccessToken.js";
 
 function responseHeaders() {
   return {
@@ -130,20 +131,39 @@ export async function serveProtectedMedia(
       return json({ error: "Media storage is unavailable" }, 503);
     }
 
-    // Public media can be requested without authentication.
-    // Invalid or missing credentials are treated as anonymous.
-    let viewerId = null;
+      // Public media can be requested without authentication.
+      // Prefer the normal authenticated session.
+      // Browser media elements can instead use a short-lived, key-scoped token.
+      let viewerId = null;
 
-    try {
-      const authenticateUser =
-        dependencies.authenticate || authenticate;
+      try {
+        const authenticateUser =
+          dependencies.authenticate || authenticate;
+        viewerId = await authenticateUser(request, env);
+      } catch {
+        viewerId = null;
+      }
 
-      viewerId = await authenticateUser(request, env);
-    } catch {
-      viewerId = null;
-    }
+      if (!viewerId) {
+        const accessToken = url.searchParams.get("access_token");
 
-    const getDb = dependencies.getDatabase || getDatabase;
+        if (accessToken) {
+          const verifyToken =
+            dependencies.verifyMediaAccessToken || verifyMediaAccessToken;
+
+          const tokenResult = await verifyToken({
+            token: accessToken,
+            secret: env.JWT_SECRET,
+            key,
+          });
+
+          if (tokenResult?.viewerId) {
+            viewerId = new ObjectId(tokenResult.viewerId);
+          }
+        }
+      }
+
+      const getDb = dependencies.getDatabase || getDatabase;
     const db = await getDb(env);
 
     const createAccess =

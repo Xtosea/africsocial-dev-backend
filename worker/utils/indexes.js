@@ -132,5 +132,14 @@ export async function ensureApplicationIndexes(db) {
     }
   );
 
+  // ------------------------------------------------------------
+  // STORIES
+  // Supports scheduled cleanup of expired Story records.
+  // Deliberately NOT a TTL index: R2 media must be deleted first.
+  // ------------------------------------------------------------
+  await db.collection("stories").createIndex(
+    { expiresAt: 1 }
+  );
+
   return true;
 }

@@ -121,7 +121,8 @@ import {
   getStoryMusic,
   createStoryMusic,
 } from "./routes/storyMusic.js";
-import { getR2SignedUploadUrl, uploadStoryMusicToR2, getReelMediaSignedUploadUrl } from "./routes/r2.js";
+import { getR2SignedUploadUrl, uploadStoryMusicToR2, getReelMediaSignedUploadUrl, uploadStoryMediaToR2 } from "./routes/r2.js";
+import { serveProtectedMedia } from "./routes/protectedMedia.js";
 import {
   sendMessage,
   getMessages,
@@ -134,6 +135,7 @@ import { getDatabase, withFreshDatabase } from "./utils/db.js";
 import { getSocialPreview } from "./routes/socialPreview.js";
 
 import { ensureApplicationIndexes } from "./utils/indexes.js";
+import { cleanupExpiredStories } from "./utils/storyCleanup.js";
 import { listProducts } from "./utils/products.js";
 import { getPremiumStatus } from "./utils/premium.js";
 import {
@@ -251,6 +253,18 @@ export default {
         requestId
       );
     }
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(
+      (async () => {
+        await ensureIndexes(env);
+        const result = await cleanupExpiredStories(env);
+        console.log("[STORY CLEANUP] Scheduled run finished:", result);
+      })().catch((error) => {
+        console.error("[STORY CLEANUP] Scheduled run failed:", error);
+      })
+    );
   },
 };
 
@@ -2007,6 +2021,35 @@ if (
   url.pathname === "/api/r2/story-music-upload"
 ) {
   return uploadStoryMusicToR2(request, env);
+}
+
+// ================= PROTECTED MEDIA DELIVERY =================
+if (
+  ["GET", "HEAD", "OPTIONS"].includes(request.method) &&
+  url.pathname === "/api/media"
+) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "Authorization, Range, If-None-Match",
+        "Access-Control-Max-Age": "86400",
+      },
+    });
+  }
+
+  return serveProtectedMedia(request, env);
+}
+
+// ================= ORDINARY USER STORY MEDIA UPLOAD =================
+
+if (
+  request.method === "POST" &&
+  url.pathname === "/api/r2/story-upload"
+) {
+  return uploadStoryMediaToR2(request, env);
 }
 
 // ================= R2 SIGNED UPLOAD =================

@@ -10,6 +10,9 @@
   ],
 
   "workers_dev": true,
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
   "vars": {
     "REELS_R2_BUCKET_NAME": "africbook"
   },

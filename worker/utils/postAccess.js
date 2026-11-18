@@ -3,6 +3,7 @@ import { ObjectId } from "mongodb";
 export function createPostAccessChecker(db, viewerId) {
   const usersCache = new Map();
   const postsCache = new Map();
+  const storiesCache = new Map();
 
   const viewerKey = String(viewerId);
 
@@ -38,6 +39,24 @@ export function createPostAccessChecker(db, viewerId) {
     }
 
     return postsCache.get(key);
+  }
+
+  async function getStory(id) {
+    const key = String(id);
+
+    if (!ObjectId.isValid(key)) return null;
+
+    if (!storiesCache.has(key)) {
+      storiesCache.set(
+        key,
+        db.collection("stories").findOne({
+          _id: new ObjectId(key),
+          expiresAt: { $gt: new Date() },
+        })
+      );
+    }
+
+    return storiesCache.get(key);
   }
 
   async function areFriends(author, viewer) {
@@ -105,8 +124,19 @@ export function createPostAccessChecker(db, viewerId) {
     if (!allowed) return false;
 
     if (post.isSharedPost === true && post.sharedFrom) {
-      const original = await getPost(post.sharedFrom);
+      if (post.sharedFromType === "story") {
+        const originalStory = await getStory(post.sharedFrom);
+        if (!originalStory) return false;
 
+        return canViewPost({
+          _id: originalStory._id,
+          user: originalStory.user,
+          visibility: originalStory.visibility || "public",
+          isSharedPost: false,
+        }, visited);
+      }
+
+      const original = await getPost(post.sharedFrom);
       if (!original) return false;
 
       return canViewPost(original, visited);

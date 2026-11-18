@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { getDatabase, debugDbOperation, withDatabaseRetry, withFreshDatabase } from "../utils/db.js";
 import { authenticate } from "../utils/auth.js";
 import { createPostAccessChecker } from "../utils/postAccess.js";
+import { getStoryMediaKeys } from "../utils/storyMedia.js";
 
 function corsHeaders() {
   return {
@@ -340,10 +341,12 @@ async function sendNotification(
 
 /* ================= CREATE POST ================= */
 
-export async function createPost(request, env) {
+export async function createPost(request, env, dependencies = {}) {
   try {
-    const userId = await authenticate(request, env);
-    const db = await getDatabase(env);
+    const auth = dependencies.authenticate || authenticate;
+    const getDb = dependencies.getDatabase || getDatabase;
+    const userId = await auth(request, env);
+    const db = await getDb(env);
     const body = await request.json();
 
     const {
@@ -370,6 +373,12 @@ export async function createPost(request, env) {
 
     if (!["public", "friends", "private"].includes(postVisibility)) {
       return json({ error: "Invalid post visibility" }, 400);
+    }
+
+    if (getStoryMediaKeys(media).length > 0) {
+      return json({
+        error: "Story media must be shared using the Story sharing feature",
+      }, 400);
     }
 
     const post = {
@@ -1125,11 +1134,13 @@ export async function savePost(
 export async function editPost(
   request,
   env,
-  postId
+  postId,
+  dependencies = {}
 ) {
   try {
-    const userId =
-      await authenticate(request, env);
+    const auth = dependencies.authenticate || authenticate;
+    const getDb = dependencies.getDatabase || getDatabase;
+    const userId = await auth(request, env);
 
     if (!validId(postId)) {
       return json({
@@ -1137,7 +1148,7 @@ export async function editPost(
       }, 400);
     }
 
-    const db = await getDatabase(env);
+    const db = await getDb(env);
     const id = new ObjectId(postId);
 
     const post =
@@ -1161,6 +1172,24 @@ export async function editPost(
     }
 
     const body = await request.json();
+
+    if (body.media) {
+      const existingStoryKeys = new Set(
+        getStoryMediaKeys(post.media)
+      );
+
+      const incomingStoryKeys = getStoryMediaKeys(body.media);
+
+      if (
+        incomingStoryKeys.some(
+          (key) => !existingStoryKeys.has(key)
+        )
+      ) {
+        return json({
+          error: "New Story media must be shared using the Story sharing feature",
+        }, 400);
+      }
+    }
 
     const update = {
       updatedAt: new Date(),

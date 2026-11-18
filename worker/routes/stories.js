@@ -1,6 +1,8 @@
 import { ObjectId } from "mongodb";
 import { getDatabase, debugDbOperation, withFreshDatabase } from "../utils/db.js";
 import { authenticate } from "../utils/auth.js";
+import { getStoryMediaKeys, isOwnedStoryMediaKey } from "../utils/storyMedia.js";
+import { createPostAccessChecker } from "../utils/postAccess.js";
 
 function corsHeaders() {
   return {
@@ -66,6 +68,24 @@ async function getUsersMap(db, ids) {
   return new Map(
     users.map(user => [String(user._id), user])
   );
+}
+
+async function filterVisibleStories(db, stories, viewerId) {
+  const access = createPostAccessChecker(db, viewerId);
+  const visible = [];
+
+  for (const story of stories) {
+    const canView = await access.canViewPost({
+      _id: story._id,
+      user: story.user,
+      visibility: story.visibility || "public",
+      isSharedPost: false,
+    });
+
+    if (canView) visible.push(story);
+  }
+
+  return visible;
 }
 
 async function populateStories(db, stories) {
@@ -281,7 +301,12 @@ export async function createStory(request, env) {
       music = null,
       stickers = [],
       backgroundColor = "#000000",
+      visibility = "public",
     } = body;
+
+    if (!["public", "friends", "private"].includes(visibility)) {
+      return json({ error: "Invalid Story visibility" }, 400);
+    }
 
     if (
       (!Array.isArray(media) || media.length === 0) &&
@@ -294,12 +319,25 @@ export async function createStory(request, env) {
       }, 400);
     }
 
+    const storyMedia = Array.isArray(media) ? media : [];
+
+    const hasInvalidR2Key = getStoryMediaKeys(storyMedia).some(
+      (key) => !isOwnedStoryMediaKey(key, String(userId))
+    );
+
+    if (hasInvalidR2Key) {
+      return json({
+        error: "Invalid Story media storage key",
+      }, 400);
+    }
+
     const db = await getDatabase(env);
     const now = new Date();
 
     const story = {
       user: new ObjectId(userId),
-      media: Array.isArray(media) ? media : [],
+      visibility,
+      media: storyMedia,
       caption,
       text,
       textStyle: {
@@ -350,15 +388,12 @@ export async function createStory(request, env) {
   }
 }
 
-export async function getStoryFeed(request, env) {
+export async function getStoryFeed(request, env, dependencies = {}) {
   try {
-    const auth = await authenticate(request, env);
-
-    if (!auth?.userId) {
-      return json({ error: "Unauthorized" }, 401);
-    }
-
-    const db = await getDatabase(env);
+    const authenticateUser = dependencies.authenticate || authenticate;
+    const databaseProvider = dependencies.getDatabase || getDatabase;
+    const viewerId = await authenticateUser(request, env);
+    const db = await databaseProvider(env);
 
     const stories =
       await debugDbOperation(
@@ -376,8 +411,11 @@ export async function getStoryFeed(request, env) {
             .toArray()
       );
 
+    const visibleStories =
+      await filterVisibleStories(db, stories, viewerId);
+
     const populated =
-      await populateStories(db, stories);
+      await populateStories(db, visibleStories);
 
     return json(populated);
 
@@ -396,11 +434,12 @@ export async function getStoryFeed(request, env) {
   }
 }
 
-export async function getStories(request, env) {
+export async function getStories(request, env, dependencies = {}) {
   try {
-    await authenticate(request, env);
-
-    return await withFreshDatabase(
+    const authenticateUser = dependencies.authenticate || authenticate;
+    const freshDatabaseProvider = dependencies.withFreshDatabase || withFreshDatabase;
+    const viewerId = await authenticateUser(request, env);
+    return await freshDatabaseProvider(
       env,
       async (db) => {
 
@@ -420,8 +459,11 @@ export async function getStories(request, env) {
             .toArray()
       );
 
+    const visibleStories =
+      await filterVisibleStories(db, stories, viewerId);
+
     const populated =
-      await populateStories(db, stories);
+      await populateStories(db, visibleStories);
 
     return json(populated);
       }
@@ -444,9 +486,13 @@ export async function getStories(request, env) {
 
 /* ================= VIEW STORY ================= */
 
-export async function viewStory(request, env) {
+export async function viewStory(request, env, dependencies = {}) {
   try {
-    const userId = await authenticate(request, env);
+    const authenticateUser = dependencies.authenticate || authenticate;
+    const databaseProvider = dependencies.getDatabase || getDatabase;
+    const awardPoints = dependencies.addPoints || addPoints;
+    const notify = dependencies.sendNotification || sendNotification;
+    const userId = await authenticateUser(request, env);
 
     const storyId =
       new URL(request.url).pathname.split("/").pop();
@@ -457,14 +503,29 @@ export async function viewStory(request, env) {
       }, 400);
     }
 
-    const db = await getDatabase(env);
+    const db = await databaseProvider(env);
 
     const story =
       await db.collection("stories").findOne({
         _id: new ObjectId(storyId),
+        expiresAt: { $gt: new Date() },
       });
 
     if (!story) {
+      return json({
+        error: "Story not found",
+      }, 404);
+    }
+
+    const access = createPostAccessChecker(db, userId);
+    const canView = await access.canViewPost({
+      _id: story._id,
+      user: story.user,
+      visibility: story.visibility || "public",
+      isSharedPost: false,
+    });
+
+    if (!canView) {
       return json({
         error: "Story not found",
       }, 404);
@@ -507,7 +568,7 @@ export async function viewStory(request, env) {
         );
 
       if (viewResult.modifiedCount === 1) {
-        await addPoints(
+        await awardPoints(
           db,
           story.user,
           1,
@@ -518,7 +579,7 @@ export async function viewStory(request, env) {
           String(story.user) !==
           String(userId)
         ) {
-          await sendNotification(db, {
+          await notify(db, {
             recipient: story.user,
             sender: userId,
             type: "STORY_VIEW",
@@ -695,46 +756,114 @@ export async function reactToStory(request, env) {
 
 /* ================= SHARE STORY ================= */
 
-export async function shareStory(request, env) {
-  try {
-    const userId = await authenticate(request, env);
+export async function shareStory(request, env, dependencies = {}) {
+  let db;
+  let storyId;
+  let reservationToken;
+  let reservationAcquired = false;
 
-    const storyId =
-      new URL(request.url).pathname.split("/").pop();
+  try {
+    const authenticateUser = dependencies.authenticate || authenticate;
+    const databaseProvider = dependencies.getDatabase || getDatabase;
+
+    const userId = await authenticateUser(request, env);
+    storyId = new URL(request.url).pathname.split("/").pop();
 
     if (!validId(storyId)) {
-      return json({
-        error: "Invalid story ID",
-      }, 400);
+      return json({ error: "Invalid story ID" }, 400);
     }
 
-    const db = await getDatabase(env);
+    db = await databaseProvider(env);
 
-    const story =
-      await db.collection("stories").findOne({
+    const stories = db.collection("stories");
+    const now = new Date();
+
+    reservationToken = crypto.randomUUID();
+
+    const reservationExpiry = new Date(
+      now.getTime() + 10 * 60 * 1000
+    );
+
+    // Atomically reserve the active Story.
+    // Sharing is blocked if cleanup has already claimed it.
+    const reservation = await stories.updateOne(
+      {
         _id: new ObjectId(storyId),
-      });
+        expiresAt: { $gt: now },
+        $or: [
+          { "cleanupLease.expiresAt": { $exists: false } },
+          { "cleanupLease.expiresAt": { $lte: now } },
+        ],
+      },
+      {
+        $push: {
+          shareReservations: {
+            token: reservationToken,
+            expiresAt: reservationExpiry,
+          },
+        },
+      }
+    );
+
+    if (reservation.modifiedCount !== 1) {
+      const existingStory = await stories.findOne(
+        { _id: new ObjectId(storyId) },
+        { projection: { _id: 1, expiresAt: 1 } }
+      );
+
+      if (
+        !existingStory ||
+        !existingStory.expiresAt ||
+        new Date(existingStory.expiresAt) <= now
+      ) {
+        return json({ error: "Story not found or has expired" }, 404);
+      }
+
+      return json({
+        error: "Story cleanup is in progress. Please try again.",
+      }, 409);
+    }
+
+    reservationAcquired = true;
+
+    const story = await stories.findOne({
+      _id: new ObjectId(storyId),
+      expiresAt: { $gt: new Date() },
+      "shareReservations.token": reservationToken,
+    });
 
     if (!story) {
-      return json({
-        error: "Story not found",
-      }, 404);
+      return json({ error: "Story is no longer available" }, 404);
+    }
+
+    const access = createPostAccessChecker(db, userId);
+    const canViewStory = await access.canViewPost({
+      _id: story._id,
+      user: story.user,
+      visibility: story.visibility || "public",
+      isSharedPost: false,
+    });
+
+    if (!canViewStory) {
+      return json({ error: "Story not found" }, 404);
     }
 
     const post = {
       user: new ObjectId(userId),
       content: story.caption || "Shared a story",
       media: story.media || [],
+      sharedFrom: story._id,
+      sharedFromType: "story",
+      originalAuthor: story.user,
+      isSharedPost: true,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
 
-    const result =
-      await db.collection("posts").insertOne(post);
-
+    const result = await db.collection("posts").insertOne(post);
     post._id = result.insertedId;
 
-    await db.collection("stories").updateOne(
+    await stories.updateOne(
       { _id: story._id },
       {
         $inc: {
@@ -747,23 +876,37 @@ export async function shareStory(request, env) {
       }
     );
 
-    return json({
-      success: true,
-      post,
-    });
-
+    return json({ success: true, post });
   } catch (err) {
     console.error("SHARE STORY ERROR:", err);
 
     if (isAuthError(err)) {
-      return json({
-        error: err.message,
-      }, 401);
+      return json({ error: err.message }, 401);
     }
 
     return json({
       error: err.message || "Share failed",
     }, 500);
+  } finally {
+    if (reservationAcquired && db && storyId && reservationToken) {
+      try {
+        await db.collection("stories").updateOne(
+          { _id: new ObjectId(storyId) },
+          {
+            $pull: {
+              shareReservations: {
+                token: reservationToken,
+              },
+            },
+          }
+        );
+      } catch (releaseError) {
+        console.error(
+          "[STORY SHARE] Failed to release reservation:",
+          releaseError
+        );
+      }
+    }
   }
 }
 

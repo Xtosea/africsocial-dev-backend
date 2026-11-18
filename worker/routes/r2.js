@@ -5,7 +5,7 @@ import { authenticate } from "../utils/auth.js";
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,PUT,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
   };
 }
@@ -300,7 +300,6 @@ export async function getR2SignedUploadUrl(request, env) {
 
     const customDomain =
       env.R2_CUSTOM_DOMAIN.replace(/\/+$/, "");
-
     return json({
       success: true,
       uploadUrl,
@@ -359,8 +358,7 @@ export async function getReelMediaSignedUploadUrl(request, env) {
       !env.R2_ACCOUNT_ID ||
       !env.R2_ACCESS_KEY_ID ||
       !env.R2_SECRET_ACCESS_KEY ||
-      !env.REELS_R2_BUCKET_NAME ||
-      !env.R2_CUSTOM_DOMAIN
+      !env.REELS_R2_BUCKET_NAME
     ) {
       console.error("Reel upload: R2 configuration is incomplete");
 
@@ -397,13 +395,12 @@ export async function getReelMediaSignedUploadUrl(request, env) {
       expiresIn: 300,
     });
 
-    const customDomain =
-      env.R2_CUSTOM_DOMAIN.replace(/\/+$/, "");
+    const mediaOrigin = new URL(request.url).origin;
 
     return json({
       success: true,
       uploadUrl,
-      fileUrl: `${customDomain}/${fileName}`,
+      fileUrl: `${mediaOrigin}/api/media?key=${encodeURIComponent(fileName)}`,
       fileName,
       contentType,
       expiresIn: 300,
@@ -422,6 +419,146 @@ export async function getReelMediaSignedUploadUrl(request, env) {
     return json({
       success: false,
       error: error.message || "Failed to create Reel upload URL",
+    }, authError ? 401 : 500);
+  }
+}
+
+/* ============================================================
+   ORDINARY USER STORY MEDIA UPLOAD
+   Uses the development MEDIA_BUCKET binding.
+   Files are isolated under stories/{userId}/.
+============================================================ */
+
+export async function uploadStoryMediaToR2(request, env, dependencies = {}) {
+  let tooLarge = false;
+
+  try {
+    const authenticateUser = dependencies.authenticate || authenticate;
+    const userId = await authenticateUser(request, env);
+
+    if (!env.MEDIA_BUCKET) {
+      return json({
+        success: false,
+        error: "Story media storage is not configured",
+      }, 500);
+    }
+
+    const contentType = String(
+      request.headers.get("Content-Type") || ""
+    ).split(";")[0].trim().toLowerCase();
+
+    const allowedTypes = {
+      "image/jpeg": { extension: "jpg", maxBytes: 10 * 1024 * 1024 },
+      "image/png": { extension: "png", maxBytes: 10 * 1024 * 1024 },
+      "image/webp": { extension: "webp", maxBytes: 10 * 1024 * 1024 },
+
+      "video/mp4": { extension: "mp4", maxBytes: 50 * 1024 * 1024 },
+      "video/webm": { extension: "webm", maxBytes: 50 * 1024 * 1024 },
+      "video/quicktime": { extension: "mov", maxBytes: 50 * 1024 * 1024 },
+      "video/x-m4v": { extension: "m4v", maxBytes: 50 * 1024 * 1024 },
+      "video/3gpp": { extension: "3gp", maxBytes: 50 * 1024 * 1024 },
+    };
+
+    const mediaType = allowedTypes[contentType];
+
+    if (!mediaType) {
+      return json({
+        success: false,
+        error: "Unsupported Story media type. Audio uploads are not permitted.",
+      }, 400);
+    }
+
+    if (!request.body) {
+      return json({
+        success: false,
+        error: "No Story media file was provided",
+      }, 400);
+    }
+
+    const maxBytes = mediaType.maxBytes;
+    const contentLengthHeader = request.headers.get("Content-Length");
+
+    if (contentLengthHeader !== null) {
+      const contentLength = Number(contentLengthHeader);
+
+      if (!Number.isFinite(contentLength) || contentLength < 0) {
+        return json({
+          success: false,
+          error: "Invalid Content-Length header",
+        }, 400);
+      }
+
+      if (contentLength > maxBytes) {
+        return json({
+          success: false,
+          error: `Story media must not exceed ${maxBytes / (1024 * 1024)} MB`,
+        }, 413);
+      }
+    }
+
+    const randomPart = crypto.randomUUID().replace(/-/g, "");
+    const extension = mediaType.extension;
+
+    const key =
+      `stories/${String(userId)}/${Date.now()}-${randomPart}.${extension}`;
+
+    let uploadedBytes = 0;
+
+    const limitedBody = request.body.pipeThrough(
+      new TransformStream({
+        transform(chunk, controller) {
+          uploadedBytes += chunk.byteLength;
+
+          if (uploadedBytes > maxBytes) {
+            tooLarge = true;
+            controller.error(
+              new Error("Story media exceeds its permitted size")
+            );
+            return;
+          }
+
+          controller.enqueue(chunk);
+        },
+      })
+    );
+
+    await env.MEDIA_BUCKET.put(key, limitedBody, {
+      httpMetadata: {
+        contentType,
+      },
+    });
+
+
+    return json({
+      success: true,
+      key,
+      fileName: key,
+      fileUrl: `${new URL(request.url).origin}/api/media?key=${encodeURIComponent(key)}`,
+      contentType,
+      size: uploadedBytes,
+    }, 201);
+
+  } catch (error) {
+    if (tooLarge) {
+      return json({
+        success: false,
+        error: "Story media exceeds its permitted upload size",
+      }, 413);
+    }
+
+    console.error("Story media upload error:", error);
+
+    const authError = [
+      "Authentication required",
+      "Invalid token",
+      "Token expired",
+      "Invalid authentication token",
+      "Invalid user ID",
+    ].includes(error.message);
+
+    return json({
+      success: false,
+      error: error.message || "Story media upload failed",
     }, authError ? 401 : 500);
   }
 }

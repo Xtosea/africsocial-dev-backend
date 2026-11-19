@@ -205,3 +205,44 @@ test("createReel saves and sanitises editor metadata", async () => {
     backgroundColor: "#123456",
   });
 });
+
+test("createReel saves voice-over and sanitises video adjustments", async () => {
+  const mock = makeDependencies();
+
+  const response = await createReel(
+    makeRequest(validReel({
+      voiceOver: {
+        audioUrl: "https://media.example.com/voiceover.webm",
+        contentType: "audio/webm;codecs=opus",
+        durationSeconds: 12,
+        volume: 1.5,
+      },
+      videoAdjustments: {
+        brightness: 2,
+        contrast: 0.7,
+        saturation: 3,
+        sepia: 0.4,
+      },
+    })),
+    {},
+    mock.dependencies
+  );
+
+  assert.equal(response.status, 201);
+
+  const reel = mock.getInsertedReel();
+
+  assert.deepEqual(reel.voiceOver, {
+    audioUrl: "https://media.example.com/voiceover.webm",
+    contentType: "audio/webm",
+    durationSeconds: 12,
+    volume: 1,
+  });
+
+  assert.deepEqual(reel.videoAdjustments, {
+    brightness: 1.5,
+    contrast: 0.7,
+    saturation: 2,
+    sepia: 0.4,
+  });
+});

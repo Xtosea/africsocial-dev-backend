@@ -23,7 +23,7 @@ function json(data, status = 200, extraHeaders = {}) {
 
 function isValidMediaKey(key) {
   return typeof key === "string" &&
-    /^(stories|reels)\/[a-f0-9]{24}\/\d+-[a-f0-9]{32}\.(jpg|png|webp|mp4|webm|mov|m4v|3gp)$/i.test(key);
+    /^(stories|reels)\/[a-f0-9]{24}\/\d+-[a-f0-9]{32}\.(jpg|png|webp|mp4|webm|mov|m4v|3gp|m4a|ogg|mp3|aac)$/i.test(key);
 }
 
 function extractR2Key(value) {
@@ -236,7 +236,10 @@ export async function serveProtectedMedia(
       const access = createAccess(db, viewerId);
 
       for (const post of posts) {
-        if (!referencesKey(post.media, key)) continue;
+        const referencesVoiceOver =
+        extractR2Key(post.voiceOver?.audioUrl) === key;
+
+      if (!referencesKey(post.media, key) && !referencesVoiceOver) continue;
 
         if (!(await access.canViewPost(post))) continue;
 

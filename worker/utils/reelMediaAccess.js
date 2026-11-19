@@ -1,7 +1,7 @@
 import { createMediaAccessToken } from "./mediaAccessToken.js";
 
 const REEL_MEDIA_KEY_PATTERN =
-  /^reels\/[a-f\d]{24}\/\d+-[a-f\d]{32}\.(jpg|png|webp|mp4|webm|mov|m4v|3gp)$/i;
+  /^reels\/[a-f\d]{24}\/\d+-[a-f\d]{32}\.(jpg|png|webp|mp4|webm|mov|m4v|3gp|m4a|ogg|mp3|aac)$/i;
 
 export async function signProtectedReelMediaUrl(
   value,

@@ -1694,6 +1694,8 @@ export async function createReel(request, env, dependencies = {}) {
       taggedFriends,
       tags,
       editor,
+      voiceOver,
+      videoAdjustments,
     } = body;
 
     const reelVisibility = visibility === undefined
@@ -1733,6 +1735,56 @@ export async function createReel(request, env, dependencies = {}) {
         ? Math.min(max, Math.max(min, number))
         : fallback;
     };
+
+    const allowedVoiceOverTypes = new Set([
+      "audio/webm",
+      "audio/mp4",
+      "audio/ogg",
+      "audio/mpeg",
+      "audio/aac",
+    ]);
+
+    const voiceOverUrl =
+      voiceOver && typeof voiceOver === "object" &&
+      !Array.isArray(voiceOver) &&
+      isHttpsUrl(voiceOver.audioUrl)
+        ? voiceOver.audioUrl
+        : "";
+
+    const voiceOverType =
+      typeof voiceOver?.contentType === "string"
+        ? voiceOver.contentType.split(";")[0].trim().toLowerCase()
+        : "";
+
+    const reelVoiceOver = voiceOverUrl && allowedVoiceOverTypes.has(voiceOverType)
+      ? {
+          audioUrl: voiceOverUrl,
+          contentType: voiceOverType,
+          durationSeconds: clamp(
+            voiceOver.durationSeconds,
+            0,
+            60,
+            0
+          ),
+          volume: clamp(voiceOver.volume, 0, 1, 1),
+        }
+      : null;
+
+    const adjustments =
+      videoAdjustments && typeof videoAdjustments === "object" &&
+      !Array.isArray(videoAdjustments)
+        ? {
+            brightness: clamp(videoAdjustments.brightness, 0.5, 1.5, 1),
+            contrast: clamp(videoAdjustments.contrast, 0.5, 1.5, 1),
+            saturation: clamp(videoAdjustments.saturation, 0, 2, 1),
+            sepia: clamp(videoAdjustments.sepia, 0, 1, 0),
+          }
+        : {
+            brightness: 1,
+            contrast: 1,
+            saturation: 1,
+            sepia: 0,
+          };
 
     const reelLocation =
       typeof location === "string" ? location.trim().slice(0, 200) : "";
@@ -1842,6 +1894,8 @@ export async function createReel(request, env, dependencies = {}) {
         },
       ],
       music: reelMusic,
+      voiceOver: reelVoiceOver,
+      videoAdjustments: adjustments,
       stickers: reelStickers,
       type: "video",
       likes: [],
@@ -2148,7 +2202,14 @@ export async function getReels(
             }))
           );
 
-          return { ...reel, media };
+          const voiceOver = reel.voiceOver?.audioUrl
+            ? {
+                ...reel.voiceOver,
+                audioUrl: await signReelMediaUrl(reel.voiceOver.audioUrl),
+              }
+            : reel.voiceOver;
+
+          return { ...reel, media, voiceOver };
         })
       );
 

@@ -332,7 +332,7 @@ export async function getReelMediaSignedUploadUrl(request, env) {
 
     const contentType = (
       new URL(request.url).searchParams.get("contentType") || ""
-    ).toLowerCase();
+    ).split(";")[0].trim().toLowerCase();
 
     const allowedTypes = {
       "video/mp4": "mp4",
@@ -343,6 +343,11 @@ export async function getReelMediaSignedUploadUrl(request, env) {
       "image/jpeg": "jpg",
       "image/png": "png",
       "image/webp": "webp",
+      "audio/webm": "webm",
+      "audio/mp4": "m4a",
+      "audio/ogg": "ogg",
+      "audio/mpeg": "mp3",
+      "audio/aac": "aac",
     };
 
     const extension = allowedTypes[contentType];

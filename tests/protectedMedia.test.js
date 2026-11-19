@@ -414,3 +414,57 @@ test("rejects an invalid media access token without serving the object", async (
   assert.equal(deps.accessViewerIds[0], null);
   assert.equal(deps.bucket.calls.get, 0);
 });
+
+test("serves voice-over audio when the Reel is accessible", async () => {
+  const voiceOverKey =
+    `reels/${ownerId}/1234567890123-abcdef0123456789abcdef0123456789.webm`;
+
+  const post = {
+    _id: new ObjectId(),
+    user: ownerId,
+    visibility: "friends",
+    isReel: true,
+    voiceOver: {
+      audioUrl: `https://dev.example.com/api/media?key=${encodeURIComponent(voiceOverKey)}`,
+      contentType: "audio/webm",
+    },
+  };
+
+  const deps = makeDependencies({ posts: [post], canView: true });
+
+  const response = await serveProtectedMedia(
+    makeRequest(voiceOverKey),
+    {},
+    deps
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(deps.bucket.calls.get, 1);
+});
+
+test("denies voice-over audio when the Reel is not accessible", async () => {
+  const voiceOverKey =
+    `reels/${ownerId}/1234567890123-abcdef0123456789abcdef0123456789.webm`;
+
+  const post = {
+    _id: new ObjectId(),
+    user: ownerId,
+    visibility: "friends",
+    isReel: true,
+    voiceOver: {
+      audioUrl: `https://dev.example.com/api/media?key=${encodeURIComponent(voiceOverKey)}`,
+      contentType: "audio/webm",
+    },
+  };
+
+  const deps = makeDependencies({ posts: [post], canView: false });
+
+  const response = await serveProtectedMedia(
+    makeRequest(voiceOverKey),
+    {},
+    deps
+  );
+
+  assert.equal(response.status, 404);
+  assert.equal(deps.bucket.calls.get, 0);
+});

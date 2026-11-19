@@ -83,3 +83,29 @@ test("does not sign a URL containing an invalid Reel media key", async () => {
     original
   );
 });
+
+test("signs protected Reel voice-over audio URLs", async () => {
+  for (const extension of ["m4a", "ogg", "mp3", "aac"]) {
+    const audioKey =
+      `reels/abcdef0123456789abcdef01/1234567890123-0123456789abcdef0123456789abcdef.${extension}`;
+
+    const original = `/api/media?key=${audioKey}`;
+    const result = await signProtectedReelMediaUrl(original, {
+      viewerId,
+      secret,
+    });
+
+    const url = new URL(result, "https://media.invalid");
+    const token = url.searchParams.get("access_token");
+
+    assert.ok(token, `Expected a signed URL for .${extension}`);
+
+    const verified = await verifyMediaAccessToken({
+      token,
+      secret,
+      key: audioKey,
+    });
+
+    assert.equal(verified.viewerId, viewerId);
+  }
+});

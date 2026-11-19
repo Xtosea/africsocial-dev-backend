@@ -1670,13 +1670,11 @@ export async function sharePostToFeed(
 
 /* ================= CREATE REEL ================= */
 
-export async function createReel(
-  request,
-  env
-) {
+export async function createReel(request, env, dependencies = {}) {
   try {
-    const userId =
-      await authenticate(request, env);
+    const auth = dependencies.authenticate || authenticate;
+    const getDb = dependencies.getDatabase || getDatabase;
+    const userId = await auth(request, env);
 
     const body = await request.json();
 
@@ -1688,6 +1686,14 @@ export async function createReel(
       music,
       stickers,
       visibility,
+      allowComments,
+      allowDuet,
+      allowRemix,
+      allowDownload,
+      location,
+      taggedFriends,
+      tags,
+      editor,
     } = body;
 
     const reelVisibility = visibility === undefined
@@ -1728,6 +1734,48 @@ export async function createReel(
         : fallback;
     };
 
+    const reelLocation =
+      typeof location === "string" ? location.trim().slice(0, 200) : "";
+
+    const reelTaggedFriends = Array.isArray(taggedFriends)
+      ? taggedFriends
+          .filter((friend) => typeof friend === "string")
+          .slice(0, 50)
+          .map((friend) => friend.trim().slice(0, 100))
+          .filter(Boolean)
+      : [];
+
+    const reelTags = Array.isArray(tags)
+      ? tags
+          .filter((tag) => typeof tag === "string")
+          .slice(0, 30)
+          .map((tag) => tag.trim().slice(0, 50))
+          .filter(Boolean)
+      : [];
+
+    const reelEditor =
+      editor && typeof editor === "object" && !Array.isArray(editor)
+        ? {
+            text: String(editor.text || "").slice(0, 500),
+            textPosition: {
+              x: clamp(editor.textPosition?.x, -1000, 1000, 50),
+              y: clamp(editor.textPosition?.y, -1000, 1000, 50),
+            },
+            textRotation: clamp(editor.textRotation, -360, 360, 0),
+            textSize: clamp(editor.textSize, 12, 200, 27),
+            textColor:
+              typeof editor.textColor === "string" &&
+              /^#[0-9a-f]{6}$/i.test(editor.textColor)
+                ? editor.textColor
+                : "#FFFFFF",
+            backgroundColor:
+              typeof editor.backgroundColor === "string" &&
+              /^#[0-9a-f]{6}$/i.test(editor.backgroundColor)
+                ? editor.backgroundColor
+                : "#000000",
+          }
+        : null;
+
     const reelStickers = Array.isArray(stickers)
       ? stickers.slice(0, 20)
           .filter((sticker) =>
@@ -1752,15 +1800,15 @@ export async function createReel(
 
     const duration = Number(durationSeconds);
 
-    if (!Number.isFinite(duration) || duration <= 0) {
+    if (!Number.isFinite(duration) || duration < 1) {
       return json({
-        error: "Valid video duration is required",
+        error: "Reels must be at least 1 second long",
       }, 400);
     }
 
     if (duration > 60) {
       return json({
-        error: "Video exceeds 60 seconds",
+        error: "Reels cannot exceed 60 seconds",
       }, 400);
     }
 
@@ -1770,13 +1818,21 @@ export async function createReel(
       }, 400);
     }
 
-    const db = await getDatabase(env);
+    const db = await getDb(env);
 
     const reel = {
       user: userId,
       visibility: reelVisibility,
-      content: caption || "",
+      content: typeof caption === "string" ? caption.slice(0, 5000) : "",
+      location: reelLocation,
+      taggedFriends: reelTaggedFriends,
+      tags: reelTags,
+      editor: reelEditor,
       isReel: true,
+    allowComments: allowComments !== false,
+    allowDuet: allowDuet === true,
+    allowRemix: allowRemix === true,
+    allowDownload: allowDownload === true,
       durationSeconds: duration,
       media: [
         {
@@ -1825,6 +1881,175 @@ export async function createReel(
         : err.message,
     }, isAuthError(err) ? 401 : 500);
   }
+}
+
+
+/* ================= REEL DUET AND REMIX ================= */
+
+async function createReelReuse(request, env, reelId, mode, dependencies = {}) {
+  try {
+    const auth = dependencies.authenticate || authenticate;
+    const getDb = dependencies.getDatabase || getDatabase;
+    const userId = await auth(request, env);
+
+    if (!validId(reelId)) {
+      return json({ error: "Invalid Reel ID" }, 400);
+    }
+
+    const db = await getDb(env);
+    const original = await db.collection("posts").findOne({
+      _id: new ObjectId(reelId),
+      isReel: true,
+    });
+
+    if (!original) {
+      return json({ error: "Reel not found" }, 404);
+    }
+
+    const accessFactory =
+      dependencies.createPostAccessChecker || createPostAccessChecker;
+
+    const access = accessFactory(db, userId);
+
+    if (!(await access.canViewPost(original))) {
+      return json({ error: "Reel not found" }, 404);
+    }
+
+    const isOriginalCreator =
+      String(original.user) === String(userId);
+
+    const permission = mode === "duet" ? "allowDuet" : "allowRemix";
+
+    if (!isOriginalCreator && original[permission] !== true) {
+      return json({
+        error: mode === "duet"
+          ? "The creator has not enabled Duet for this Reel"
+          : "The creator has not enabled Remix for this Reel",
+      }, 403);
+    }
+
+    const body = await request.json();
+    const videoUrl = body.videoUrl;
+
+    const isHttpsUrl = (value) => {
+      try {
+        return typeof value === "string" &&
+          new URL(value).protocol === "https:";
+      } catch {
+        return false;
+      }
+    };
+
+    if (!isHttpsUrl(videoUrl)) {
+      return json({ error: "A valid HTTPS video URL is required" }, 400);
+    }
+
+    const duration = Number(body.durationSeconds);
+
+    if (!Number.isFinite(duration) || duration < 1) {
+      return json({
+        error: "Reels must be at least 1 second long",
+      }, 400);
+    }
+
+    if (duration > 60) {
+      return json({
+        error: "Reels cannot exceed 60 seconds",
+      }, 400);
+    }
+
+    const thumbnailUrl = isHttpsUrl(body.thumbnailUrl)
+      ? body.thumbnailUrl
+      : "";
+
+    const reel = {
+      user: userId,
+      visibility: original.visibility || "public",
+      content: String(body.caption || "").slice(0, 5000),
+      isReel: true,
+
+      // Keep the original Reel protected through recursive access checks.
+      isSharedPost: true,
+      sharedFrom: original._id,
+      sharedFromType: "reel",
+      originalAuthor: original.originalAuthor || original.user,
+
+      // Identify the specific reuse operation.
+      reuseType: mode,
+      sourceReelId: original._id,
+
+      // New Reel permissions are independent of the source Reel.
+      allowComments: body.allowComments !== false,
+      allowDuet: body.allowDuet === true,
+      allowRemix: body.allowRemix === true,
+      allowDownload: body.allowDownload === true,
+
+      durationSeconds: duration,
+      media: [{
+        url: videoUrl,
+        type: "video",
+        thumbnailUrl,
+      }],
+
+      music: null,
+      stickers: [],
+      type: "video",
+      likes: [],
+      reactions: [],
+      comments: [],
+      shares: 0,
+      savedBy: [],
+      pinned: false,
+      viewedBy: [],
+      viewsCount: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await db.collection("posts").insertOne(reel);
+    reel._id = result.insertedId;
+
+    const populated = await populatePosts(db, [reel]);
+
+    return json(populated[0], 201);
+  } catch (err) {
+    console.error(`CREATE REEL ${mode.toUpperCase()} ERROR:`, err);
+
+    return json(
+      { error: err.message },
+      isAuthError(err) ? 401 : 500
+    );
+  }
+}
+
+export async function createReelDuet(
+  request,
+  env,
+  reelId,
+  dependencies = {}
+) {
+  return createReelReuse(
+    request,
+    env,
+    reelId,
+    "duet",
+    dependencies
+  );
+}
+
+export async function createReelRemix(
+  request,
+  env,
+  reelId,
+  dependencies = {}
+) {
+  return createReelReuse(
+    request,
+    env,
+    reelId,
+    "remix",
+    dependencies
+  );
 }
 
 /* ================= GET REELS ================= */

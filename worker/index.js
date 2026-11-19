@@ -71,6 +71,8 @@ import {
   getSavedPosts,
   sharePostToFeed,
   createReel,
+  createReelDuet,
+  createReelRemix,
   getReels,
   viewReel,
     recordReelWatch,
@@ -2254,6 +2256,28 @@ if (
       if (parts.length === 4) {
         const postId = parts[2];
         const action = parts[3];
+
+        if (
+          request.method === "POST" &&
+          action === "duet"
+        ) {
+          return await createReelDuet(
+            request,
+            env,
+            postId
+          );
+        }
+
+        if (
+          request.method === "POST" &&
+          action === "remix"
+        ) {
+          return await createReelRemix(
+            request,
+            env,
+            postId
+          );
+        }
 
         if (
           request.method === "POST" &&

@@ -91,10 +91,16 @@ function makeDependencies({ posts = [], story = null, canView = true, authentica
   };
 }
 
-function makeRequest(key, method = "GET", accessToken = null) {
+function makeRequest(
+  key,
+  method = "GET",
+  accessToken = null,
+  download = false
+) {
   const url = new URL("https://dev.example.com/api/media");
   url.searchParams.set("key", key);
   if (accessToken) url.searchParams.set("access_token", accessToken);
+  if (download) url.searchParams.set("download", "1");
   return new Request(url, { method });
 }
 
@@ -194,6 +200,76 @@ test("denies friends-only media when access is not granted", async () => {
 
   assert.equal(response.status, 404);
   assert.equal(deps.bucket.calls.get, 0);
+});
+
+test("allows downloading a Reel when its creator enables downloads", async () => {
+  const post = {
+    _id: new ObjectId(),
+    user: ownerId,
+    visibility: "public",
+    isReel: true,
+    allowDownload: true,
+    media: [{ key: reelKey, type: "video" }],
+  };
+
+  const deps = makeDependencies({ posts: [post], canView: true });
+  const response = await serveProtectedMedia(
+    makeRequest(reelKey, "GET", null, true),
+    {},
+    deps
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Cache-Control"), "private, no-store");
+  assert.equal(deps.bucket.calls.get, 1);
+});
+
+test("denies Reel downloads when the creator disables downloads", async () => {
+  const post = {
+    _id: new ObjectId(),
+    user: ownerId,
+    visibility: "public",
+    isReel: true,
+    allowDownload: false,
+    media: [{ key: reelKey, type: "video" }],
+  };
+
+  const deps = makeDependencies({ posts: [post], canView: true });
+  const response = await serveProtectedMedia(
+    makeRequest(reelKey, "GET", null, true),
+    {},
+    deps
+  );
+
+  assert.equal(response.status, 404);
+  assert.equal(deps.bucket.calls.get, 0);
+});
+
+test("allows a Reel creator to download their own Reel", async () => {
+  const post = {
+    _id: new ObjectId(),
+    user: ownerId,
+    visibility: "public",
+    isReel: true,
+    allowDownload: false,
+    media: [{ key: reelKey, type: "video" }],
+  };
+
+  const deps = makeDependencies({
+    posts: [post],
+    canView: true,
+    authenticate: async () => ownerId,
+  });
+
+  const response = await serveProtectedMedia(
+    makeRequest(reelKey, "GET", null, true),
+    {},
+    deps
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Cache-Control"), "private, no-store");
+  assert.equal(deps.bucket.calls.get, 1);
 });
 
 test("serves an authorised Story thumbnail", async () => {

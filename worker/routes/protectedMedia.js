@@ -120,6 +120,7 @@ export async function serveProtectedMedia(
   try {
     const url = new URL(request.url);
     const key = url.searchParams.get("key");
+    const isDownloadRequest = url.searchParams.get("download") === "1";
 
     if (!isValidMediaKey(key)) {
       return json({ error: "Invalid media key" }, 400);
@@ -239,7 +240,26 @@ export async function serveProtectedMedia(
 
         if (!(await access.canViewPost(post))) continue;
 
+        if (isDownloadRequest) {
+          const isOwner =
+            viewerId && String(post.user) === String(viewerId);
+          const isVideoKey = /\.(mp4|webm|mov|m4v|3gp)$/i.test(key);
+
+          if (
+            post.isReel !== true ||
+            !isVideoKey ||
+            (post.allowDownload !== true && !isOwner)
+          ) {
+            continue;
+          }
+        }
+
         authorized = true;
+
+        if (isDownloadRequest) {
+          publiclyCacheable = false;
+          continue;
+        }
 
         // Shared posts are conservatively never publicly cached.
         if (post.isSharedPost === true) continue;
